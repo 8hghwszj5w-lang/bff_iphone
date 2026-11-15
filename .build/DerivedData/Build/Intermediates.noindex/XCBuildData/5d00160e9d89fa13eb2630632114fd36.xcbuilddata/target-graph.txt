@@ -1,0 +1,4 @@
+Target dependency graph (2 targets)
+Target 'FenShenTests' in project 'FenShen'
+➜ Explicit dependency on target 'FenShen' in project 'FenShen'
+Target 'FenShen' in project 'FenShen' (no dependencies)

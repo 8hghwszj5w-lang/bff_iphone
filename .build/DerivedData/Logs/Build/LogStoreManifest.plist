@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>logFormatVersion</key>
+	<integer>13</integer>
+	<key>logs</key>
+	<dict>
+		<key>26598653-4D00-4E2A-AAEA-6D30F73D8E23</key>
+		<dict>
+			<key>className</key>
+			<string>IDECommandLineBuildLog</string>
+			<key>documentTypeString</key>
+			<string>&lt;nil&gt;</string>
+			<key>domainType</key>
+			<string>Xcode.IDEActivityLogDomainType.BuildLog</string>
+			<key>fileName</key>
+			<string>26598653-4D00-4E2A-AAEA-6D30F73D8E23.xcactivitylog</string>
+			<key>hasPrimaryLog</key>
+			<true/>
+			<key>primaryObservable</key>
+			<dict>
+				<key>highLevelStatus</key>
+				<string>W</string>
+				<key>totalNumberOfAnalyzerIssues</key>
+				<integer>0</integer>
+				<key>totalNumberOfErrors</key>
+				<integer>0</integer>
+				<key>totalNumberOfTestFailures</key>
+				<integer>0</integer>
+				<key>totalNumberOfWarnings</key>
+				<integer>7</integer>
+			</dict>
+			<key>schemeIdentifier-containerName</key>
+			<string>FenShen project</string>
+			<key>schemeIdentifier-schemeName</key>
+			<string>FenShen</string>
+			<key>schemeIdentifier-sharedScheme</key>
+			<integer>1</integer>
+			<key>signature</key>
+			<string>Testing project FenShen with scheme FenShen</string>
+			<key>timeStartedRecording</key>
+			<real>816435201.586115</real>
+			<key>timeStoppedRecording</key>
+			<real>816435206.74964094</real>
+			<key>title</key>
+			<string>Testing project FenShen with scheme FenShen</string>
+			<key>uniqueIdentifier</key>
+			<string>26598653-4D00-4E2A-AAEA-6D30F73D8E23</string>
+		</dict>
+		<key>8855E8AC-3A7E-43DE-9351-D6BA26EA8101</key>
+		<dict>
+			<key>className</key>
+			<string>IDECommandLineBuildLog</string>
+			<key>documentTypeString</key>
+			<string>&lt;nil&gt;</string>
+			<key>domainType</key>
+			<string>Xcode.IDEActivityLogDomainType.BuildLog</string>
+			<key>fileName</key>
+			<string>8855E8AC-3A7E-43DE-9351-D6BA26EA8101.xcactivitylog</string>
+			<key>hasPrimaryLog</key>
+			<true/>
+			<key>primaryObservable</key>
+			<dict>
+				<key>highLevelStatus</key>
+				<string>E</string>
+				<key>totalNumberOfAnalyzerIssues</key>
+				<integer>0</integer>
+				<key>totalNumberOfErrors</key>
+				<integer>18</integer>
+				<key>totalNumberOfTestFailures</key>
+				<integer>0</integer>
+				<key>totalNumberOfWarnings</key>
+				<integer>0</integer>
+			</dict>
+			<key>schemeIdentifier-containerName</key>
+			<string>FenShen project</string>
+			<key>schemeIdentifier-schemeName</key>
+			<string>FenShen</string>
+			<key>schemeIdentifier-sharedScheme</key>
+			<integer>1</integer>
+			<key>signature</key>
+			<string>Testing project FenShen with scheme FenShen</string>
+			<key>timeStartedRecording</key>
+			<real>816434821.28791106</real>
+			<key>timeStoppedRecording</key>
+			<real>816434823.69331205</real>
+			<key>title</key>
+			<string>Testing project FenShen with scheme FenShen</string>
+			<key>uniqueIdentifier</key>
+			<string>8855E8AC-3A7E-43DE-9351-D6BA26EA8101</string>
+		</dict>
+	</dict>
+</dict>
+</plist>

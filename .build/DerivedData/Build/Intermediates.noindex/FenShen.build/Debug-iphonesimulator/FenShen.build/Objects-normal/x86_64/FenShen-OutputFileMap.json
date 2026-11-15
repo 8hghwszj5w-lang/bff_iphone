@@ -1,0 +1,79 @@
+{
+  "" : {
+    "diagnostics" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/FenShen-primary.dia",
+    "emit-module-dependencies" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/FenShen-primary-emit-module.d",
+    "emit-module-diagnostics" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/FenShen-primary-emit-module.dia",
+    "pch" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/FenShen-primary-Bridging-header.pch",
+    "swift-dependencies" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/FenShen-primary.swiftdeps"
+  },
+  "/Users/luyao/Documents/deepseek-harness/bff_iphone/Sources/App/FenShenApp.swift" : {
+    "const-values" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/FenShenApp.swiftconstvalues",
+    "dependencies" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/FenShenApp.d",
+    "diagnostics" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/FenShenApp.dia",
+    "index-unit-output-path" : "/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/FenShenApp.o",
+    "llvm-bc" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/FenShenApp.bc",
+    "object" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/FenShenApp.o",
+    "swift-dependencies" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/FenShenApp.swiftdeps",
+    "swiftmodule" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/FenShenApp~partial.swiftmodule"
+  },
+  "/Users/luyao/Documents/deepseek-harness/bff_iphone/Sources/Core/Pipeline.swift" : {
+    "const-values" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/Pipeline.swiftconstvalues",
+    "dependencies" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/Pipeline.d",
+    "diagnostics" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/Pipeline.dia",
+    "index-unit-output-path" : "/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/Pipeline.o",
+    "llvm-bc" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/Pipeline.bc",
+    "object" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/Pipeline.o",
+    "swift-dependencies" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/Pipeline.swiftdeps",
+    "swiftmodule" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/Pipeline~partial.swiftmodule"
+  },
+  "/Users/luyao/Documents/deepseek-harness/bff_iphone/Sources/Core/Stores.swift" : {
+    "const-values" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/Stores.swiftconstvalues",
+    "dependencies" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/Stores.d",
+    "diagnostics" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/Stores.dia",
+    "index-unit-output-path" : "/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/Stores.o",
+    "llvm-bc" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/Stores.bc",
+    "object" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/Stores.o",
+    "swift-dependencies" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/Stores.swiftdeps",
+    "swiftmodule" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/Stores~partial.swiftmodule"
+  },
+  "/Users/luyao/Documents/deepseek-harness/bff_iphone/Sources/Model/DeepSeekClient.swift" : {
+    "const-values" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/DeepSeekClient.swiftconstvalues",
+    "dependencies" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/DeepSeekClient.d",
+    "diagnostics" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/DeepSeekClient.dia",
+    "index-unit-output-path" : "/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/DeepSeekClient.o",
+    "llvm-bc" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/DeepSeekClient.bc",
+    "object" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/DeepSeekClient.o",
+    "swift-dependencies" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/DeepSeekClient.swiftdeps",
+    "swiftmodule" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/DeepSeekClient~partial.swiftmodule"
+  },
+  "/Users/luyao/Documents/deepseek-harness/bff_iphone/Sources/Tools/Tools.swift" : {
+    "const-values" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/Tools.swiftconstvalues",
+    "dependencies" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/Tools.d",
+    "diagnostics" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/Tools.dia",
+    "index-unit-output-path" : "/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/Tools.o",
+    "llvm-bc" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/Tools.bc",
+    "object" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/Tools.o",
+    "swift-dependencies" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/Tools.swiftdeps",
+    "swiftmodule" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/Tools~partial.swiftmodule"
+  },
+  "/Users/luyao/Documents/deepseek-harness/bff_iphone/Sources/UI/ChatView.swift" : {
+    "const-values" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/ChatView.swiftconstvalues",
+    "dependencies" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/ChatView.d",
+    "diagnostics" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/ChatView.dia",
+    "index-unit-output-path" : "/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/ChatView.o",
+    "llvm-bc" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/ChatView.bc",
+    "object" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/ChatView.o",
+    "swift-dependencies" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/ChatView.swiftdeps",
+    "swiftmodule" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/ChatView~partial.swiftmodule"
+  },
+  "/Users/luyao/Documents/deepseek-harness/bff_iphone/Sources/UI/SettingsView.swift" : {
+    "const-values" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/SettingsView.swiftconstvalues",
+    "dependencies" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/SettingsView.d",
+    "diagnostics" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/SettingsView.dia",
+    "index-unit-output-path" : "/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/SettingsView.o",
+    "llvm-bc" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/SettingsView.bc",
+    "object" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/SettingsView.o",
+    "swift-dependencies" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/SettingsView.swiftdeps",
+    "swiftmodule" : "/Users/luyao/Documents/deepseek-harness/bff_iphone/.build/DerivedData/Build/Intermediates.noindex/FenShen.build/Debug-iphonesimulator/FenShen.build/Objects-normal/x86_64/SettingsView~partial.swiftmodule"
+  }
+}
