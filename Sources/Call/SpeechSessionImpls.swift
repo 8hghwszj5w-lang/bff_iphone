@@ -87,11 +87,18 @@ struct LegacySpeechRecognitionState {
     }
 }
 
+/// 启动失败时是否允许 CallViewModel 自动回退到 Legacy 会话。
+/// 只有 iOS 26 的 ModernSpeechSession 需要这个标记（用协议避免在非门控代码里
+/// 直接引用带 @available(iOS 26) 的类型）。
+protocol FallbackCapableSession: SpeechSession {
+    var fallbackOnStartFailure: Bool { get }
+}
+
 // MARK: - iOS 26+：SpeechAnalyzer + SpeechTranscriber（progressiveTranscription）
 
 @available(iOS 26.0, *)
 @MainActor
-final class ModernSpeechSession: SpeechSession {
+final class ModernSpeechSession: SpeechSession, FallbackCapableSession {
     var onEvent: (@MainActor (STTEvent) -> Void)?
 
     private var transcriber: SpeechTranscriber?
@@ -111,8 +118,22 @@ final class ModernSpeechSession: SpeechSession {
 
         do {
             try await withTaskCancellationHandler {
+                // ⚠️ 闪退修复：SpeechTranscriber(locale:) 在 locale 不被支持时是
+                // 硬 trap（无法 catch，直接崩）——部分 iOS 26.0 设备/所有模拟器的
+                // zh-CN 转写不在支持列表里。构造前必须先用两个静态检查守卫。
+                // 文档：SpeechTranscriber.isAvailable / supportedLocale(equivalentTo:)
+                guard SpeechTranscriber.isAvailable else {
+                    throw NSError(domain: "CallSTT", code: 422, userInfo: [
+                        NSLocalizedDescriptionKey: "此系统的 iOS 26 语音转写不可用，正在回退旧识别方案…"])
+                }
+                guard let mapped = await SpeechTranscriber.supportedLocale(
+                    equivalentTo: Locale(identifier: "zh-CN")) else {
+                    throw NSError(domain: "CallSTT", code: 422, userInfo: [
+                        NSLocalizedDescriptionKey: "此系统的 iOS 26 语音转写不支持中文，正在回退旧识别方案…"])
+                }
+
                 let transcriber = SpeechTranscriber(
-                    locale: Locale(identifier: "zh-CN"),
+                    locale: mapped,
                     preset: .progressiveTranscription)   // 渐进式：边说边出临时字幕
 
                 // 首次使用需要下载识别模型；每个挂起点后检查 stop/取消，防止迟到启动。
@@ -206,6 +227,9 @@ final class ModernSpeechSession: SpeechSession {
 
     // engine 由本类自持（CallViewModel 不感知新/旧 API 差异）
     private let audioEngine = AVAudioEngine()
+
+    /// Modern 会话启动失败（locale 不支持 / 模型不可用）时允许 VM 回退旧方案
+    var fallbackOnStartFailure: Bool { true }
 
     private func installTapAndStartEngine(continuation: AsyncStream<AnalyzerInput>.Continuation) throws {
         let input = audioEngine.inputNode

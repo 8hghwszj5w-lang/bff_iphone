@@ -119,7 +119,19 @@ final class CallViewModel {
         if let denied { failCall(denied); return }
         do {
             try configureAudioSession()
-            try await speechSession.start()
+            do {
+                try await speechSession.start()
+            } catch {
+                // iOS 26 语音转写不可用（locale 不支持 / 模型下载失败）→
+                // Modern 会话抛错。自动换回系统经典识别方案重试一次，
+                // 而不是让整通电话失败（旧方案在 iOS 26 上依然可用）。
+                let fallbackCapable = (speechSession as? FallbackCapableSession)?.fallbackOnStartFailure == true
+                guard fallbackCapable else { throw error }
+                speechSession = LegacySpeechSession()
+                speechSession.onEvent = { [weak self] event in self?.handleSpeechEvent(event) }
+                degradationNote = "iOS 26 语音转写不可用，已切换系统经典识别方案"
+                try await speechSession.start()
+            }
             guard isCurrentCall(id), !Task.isCancelled else { return }
             phase = .listening
         } catch {
