@@ -2,6 +2,17 @@ import SwiftUI
 import PhotosUI
 
 // MARK: - 设置页（API Key / 模型 / 行为开关）
+//
+// 这个文件装了设置主页面和全部 6 个子页面，结构如下（都在一个 NavigationStack 里推入）：
+//   SettingsView            主页面：入口列表 + 联网开关 + 温度/窗口 + 清空记忆
+//   ├ UsageView             用量信息：累计 token、估算花费、官方定价、近 7 天
+//   ├ RechargeView          充值：拉起 Safari 收银台 + 微信/支付宝 App
+//   ├ MemoryView            记忆管理：浏览窗口/改摘要/导出 JSON/分段清理
+//   ├ ChatBackgroundView    聊天背景：选样式或照片（选照片进 ImageCropView 裁剪）
+//   ├ PersonaEditor         人设：改她的性格（存 UserDefaults "persona.md"）
+//   └ DeepSeekApiSettingsView  API Key/地址/模型 + 连通测试
+// 加新子页面：写一个 View，主页面 body 里加 NavigationLink { 目标页 } 即可。
+// 所有页面通过 @EnvironmentObject app 拿全局状态，改 Store 字段即时生效并持久化。
 
 struct SettingsView: View {
     @EnvironmentObject private var app: AppState
@@ -236,7 +247,10 @@ struct UsageView: View {
     }
 
     // MARK: 定价（来源：api-docs.deepseek.com/zh-cn/quick_start/pricing，2026-11 查询；单位：元 / 百万 tokens，高峰价）
-
+    //
+    // ⚠️ 官方调价后要手动更新这里（页面没做动态拉取，避免每次打开设置都发请求）：
+    // hit = 输入·缓存命中   miss = 输入·缓存未命中   out = 输出（均为高峰价，空闲自动减半）
+    // 官方页面还有一个"浏览器打开价格表"按钮（UsageView 里搜 pricing），核对用。
     private var pricing: (name: String, hit: Double, miss: Double, out: Double) {
         let pro = app.settings.model.lowercased().contains("v4-pro")
         return pro

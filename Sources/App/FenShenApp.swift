@@ -14,14 +14,36 @@ struct FenShenApp: App {
 }
 
 /// 全局运行时：装配模型客户端、记忆、流水线（对应原项目 core-runtime.js 的角色）
+///
+/// ┌─ 数据流总览（改代码前先看这个）──────────────────────────────┐
+/// │ ChatView(聊天界面)                                          │
+/// │   └→ Pipeline.handle(用户文字+图片+文件)                     │
+/// │        ├→ DeepSeekClient.uploadFile  文件先传 Files API      │
+/// │        ├→ MemoryStore.append          消息落盘（可重启恢复）  │
+/// │        ├→ DeepSeekClient.ask          调模型（SSE 流式）      │
+/// │        │    └→ tools 里的 AgentTool   模型要联网时回调        │
+/// │        └→ UsageStore.append           token 用量落盘         │
+/// │ 所有 Store 的持久化文件都在 App 沙盒 Documents/ 下             │
+/// └──────────────────────────────────────────────────────────┘
+///
+/// 想改什么去哪改：
+/// · 模型名 / API Key / 温度      → Stores.swift 的 SettingsStore（设置页可改）
+/// · 她的性格与说话方式           → Stores.swift 的 PersonaStore.defaultPersona
+/// · 给模型加新能力（工具）       → Tools.swift 仿照 WebSearchTool 写一个，
+///                                  再在下面 init 里加进 tools 数组
+/// · 消息的处理流程               → Pipeline.swift 的 handle(_:)
+/// · 聊天界面 / 输入栏            → UI/ChatView.swift
 @MainActor
 final class AppState: ObservableObject {
+    // 全部声明为 var：SettingsView 里用 $app.settings.xxx 直接绑定子 Store 的字段，
+    // Binding 的动态成员查找要求路径上每一段都可写。
     var settings: SettingsStore
     var memory: MemoryStore
     var persona: PersonaStore
     var pipeline: Pipeline
     var usage: UsageStore
     var chatBackground = ChatBackgroundStore()
+    // 持有 Combine 订阅，否则 sink 会被立即释放、UI 不再刷新
     private var storeSubscriptions = Set<AnyCancellable>()
 
     init() {
@@ -34,6 +56,7 @@ final class AppState: ObservableObject {
         self.usage = UsageStore(directory: docs)
         let search = WebSearchTool()
         let client = DeepSeekClient(settings: settings)
+        // 想加新工具：在这里往 tools 数组里多放一个（实现 AgentTool 协议即可）
         self.pipeline = Pipeline(client: client, memory: memory,
                                  persona: persona, tools: [search],
                                  settings: settings, usage: usage)

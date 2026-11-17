@@ -3,11 +3,18 @@ import PhotosUI
 import UniformTypeIdentifiers
 
 // MARK: - 聊天界面
+//
+// 发一条消息的完整旅程（改输入/发送逻辑前先看）：
+//   输入框/📷/📎 → send() 取走 input + 附件 → 气泡先上屏（含轻量摘要）
+//   → Task 后台：图片转 JPEG、文件交给 Pipeline（内部上传 Files API）
+//   → pipeline.handle 流式回调 → ChatDeltaBuffer 攒 50ms 批量刷 UI（约 20Hz）
+//   → 收到完整回复 → 落定气泡
+// 注意：messages 是本地 @State，历史恢复靠 onAppear 从 MemoryStore 读。
 
 struct ChatMessageView: Identifiable, Equatable {
     var id: UUID
     var role: String       // user / assistant
-    var text: String
+    var text: String       // 气泡显示的文本（带附件时是摘要，不是喂给模型的全文）
     var isStreaming = false
 
     init(role: String, text: String, isStreaming: Bool = false, id: UUID = UUID()) {
@@ -22,10 +29,14 @@ struct ChatView: View {
     @State private var busy = false
     @State private var error: String?
     @State private var showSettings = false
+    @State private var showCalls = false
     @State private var photoItem: PhotosPickerItem?
+    @State private var albumPickerPresented = false   // ＋ 面板「相册」磁贴触发
     @State private var showFileImporter = false
     @State private var pendingImage: UIImage?
-    @State private var pendingFile: (name: String, text: String)?
+    @State private var pendingFile: (name: String, url: URL)?
+    @State private var showAttachmentPanel = false   // 微信式「＋」面板展开态
+    @State private var showCamera = false            // 拍摄（真机）
     @FocusState private var inputFocused: Bool
 
     var body: some View {
@@ -50,6 +61,12 @@ struct ChatView: View {
                 inputBar
             }
             .background { chatBackgroundLayer.ignoresSafeArea() }
+            .toolbar {
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    Button { showCalls = true } label: { Image(systemName: "phone") }
+                }
+            }
+            .sheet(isPresented: $showCalls){ PhoneView() }
             .navigationTitle("大肥鱼")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -88,23 +105,8 @@ struct ChatView: View {
     private var inputBar: some View {
         VStack(spacing: 0) {
             attachmentChips
+            // 微信式输入行：[输入框][＋][发送]。＋ 只负责开合下方面板。
             HStack(alignment: .bottom, spacing: 8) {
-                PhotosPicker(selection: $photoItem, matching: .images) {
-                    Image(systemName: "photo.badge.plus")
-                        .font(.system(size: 20))
-                        .foregroundStyle(.secondary)
-                        .padding(8)
-                }
-                .disabled(busy)
-                Button {
-                    showFileImporter = true
-                } label: {
-                    Image(systemName: "paperclip")
-                        .font(.system(size: 20))
-                        .foregroundStyle(.secondary)
-                        .padding(8)
-                }
-                .disabled(busy)
                 TextField("说点什么…", text: $input, axis: .vertical)
                     .lineLimit(1...5)
                     .padding(10)
@@ -112,6 +114,16 @@ struct ChatView: View {
                     .cornerRadius(18)
                     .focused($inputFocused)
                     .onSubmit(send)
+                // ＋：再点一次收起；展开时顺带收起键盘（微信行为）
+                Button {
+                    showAttachmentPanel.toggle()
+                    if showAttachmentPanel { inputFocused = false }
+                } label: {
+                    Image(systemName: showAttachmentPanel ? "plus.circle.fill" : "plus.circle")
+                        .font(.system(size: 26))
+                        .foregroundStyle(showAttachmentPanel ? Color.accentColor : .secondary)
+                }
+                .disabled(busy)
                 Button {
                     busy ? nil : send()
                 } label: {
@@ -127,17 +139,85 @@ struct ChatView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
             .background(.bar)
+
+            // ＋ 展开的宫格面板（微信风格：图标在上、文字在下，一排四个）
+            if showAttachmentPanel {
+                attachmentPanel
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
         }
+        // 选择器必须挂在常驻视图上；磁贴点击会立即移除整个附件面板。
+        .photosPicker(isPresented: $albumPickerPresented,
+                      selection: $photoItem,
+                      matching: .images)
         .fileImporter(isPresented: $showFileImporter,
                       allowedContentTypes: [.data],
                       allowsMultipleSelection: false) { result in
+            showAttachmentPanel = false
             handlePickedFile(result)
+        }
+        .fullScreenCover(isPresented: $showCamera) {
+            CameraPicker { image in
+                if let image {
+                    pendingImage = image       // 与相册共用同一条待发附件通道
+                    pendingFile = nil
+                    showAttachmentPanel = false
+                }
+            }
+            .ignoresSafeArea()
         }
         .onChange(of: photoItem) { item in
             guard let item else { return }
+            showAttachmentPanel = false
             loadPhoto(item)
             photoItem = nil
         }
+        // 键盘弹起时自动收起面板（互斥，同微信）
+        .onChange(of: inputFocused) { focused in
+            if focused { showAttachmentPanel = false }
+        }
+    }
+
+    /// ＋ 展开的附件宫格。想加新入口：加一个 panelTile 并接好动作即可。
+    private var attachmentPanel: some View {
+        HStack(spacing: 0) {
+            panelTile(icon: "photo.on.rectangle.angled", label: "相册") {
+                showAttachmentPanel = false
+                albumPickerPresented = true   // 打开系统相册选择器
+            }
+            panelTile(icon: "camera.fill", label: "拍摄") {
+                showAttachmentPanel = false
+                showCamera = true
+            }
+            panelTile(icon: "folder.fill", label: "文件") {
+                showAttachmentPanel = false
+                showFileImporter = true
+            }
+        }
+        .padding(.vertical, 18)
+        .padding(.horizontal, 8)
+        .background(Color(.systemGroupedBackground))
+    }
+
+    /// 面板里的单个磁贴：圆角方块内放大图标，下方一行小字
+    private func panelTile(icon: String, label: String,
+                           action: @escaping () -> Void) -> some View {
+        Button {
+            action()
+        } label: {
+            VStack(spacing: 6) {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Color(.secondarySystemGroupedBackground))
+                    .frame(width: 62, height: 62)
+                    .overlay(Image(systemName: icon).font(.system(size: 26)).foregroundStyle(.secondary))
+                Text(label)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.plain)
+        .disabled(busy)
     }
 
     /// 待发送附件预览条
@@ -152,9 +232,6 @@ struct ChatView: View {
                             .scaledToFill()
                             .frame(width: 38, height: 38)
                             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                        Text("图片 · 发送时识别文字")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
                         removeButton { pendingImage = nil }
                     }
                 }
@@ -166,7 +243,7 @@ struct ChatView: View {
                             .frame(width: 38)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(file.name).font(.caption).lineLimit(1)
-                            Text("\(file.text.count) 字 · 发送时附上提取内容")
+                            Text(sendHint(for: file.url))
                                 .font(.caption2).foregroundStyle(.tertiary)
                         }
                         removeButton { pendingFile = nil }
@@ -193,7 +270,9 @@ struct ChatView: View {
         }
     }
 
-    // MARK: 附件处理
+    /// 附件处理
+    // 想支持一次带多个图片/文件：把 pendingImage/pendingFile 换成数组，
+    // chips 用 ForEach 渲染，send() 里 captured 原样传数组即可（Pipeline 已支持数组入参）。
 
     private func loadPhoto(_ item: PhotosPickerItem) {
         guard !busy else { return }
@@ -240,10 +319,8 @@ struct ChatView: View {
                     pendingImage = image
                     pendingFile = nil
                 } else {
-                    let text = try await Task.detached(priority: .userInitiated) {
-                        try AttachmentExtractor.fileText(from: url)
-                    }.value
-                    pendingFile = (url.lastPathComponent, text)
+                    // 不做本地预抽取：发送时按类型直传 Files API 或兜底抽取
+                    pendingFile = (url.lastPathComponent, url)
                     pendingImage = nil
                 }
             } catch {
@@ -296,7 +373,7 @@ struct ChatView: View {
         let capturedFile = pendingFile
         guard !text.isEmpty || capturedImage != nil || capturedFile != nil else { return }
 
-        // 气泡里显示轻量摘要；OCR/文件全文只喂给模型
+        // 气泡里显示轻量摘要；图片/文件全文按官方文档直传给模型
         var visibleParts: [String] = []
         if capturedImage != nil { visibleParts.append("📷 图片") }
         if let f = capturedFile { visibleParts.append("📄 \(f.name)") }
@@ -332,18 +409,22 @@ struct ChatView: View {
         }
 
         Task { @MainActor in
-            // 组装喂给模型的内容：附件提取出的文字 + 用户附言
-            var modelText = text
-            if let f = capturedFile {
-                let block = "【用户发来文件「\(f.name)」，内容如下】\n\(f.text)"
-                modelText = modelText.isEmpty ? block : block + "\n\n" + modelText
-            }
+            // 图片按官方文档转 JPEG base64 内联；文件由流水线按类型直传 Files API。
+            // 压缩参数：0.85 质量 + ImageIO 已限制 4096px，单图约 1–3MB，
+            // 远小于官方 32MiB 单图 / 48MiB 请求体上限，一般不用动。
+            let imageData: [Data]
             if let img = capturedImage {
-                let ocr = await AttachmentExtractor.ocr(from: img)
-                let block = ocr.isEmpty
-                    ? "【用户发来一张图片，本机 OCR 未识别到文字】"
-                    : "【用户发来一张图片，OCR 识别内容如下】\n\(String(ocr.prefix(AttachmentExtractor.maxOCRChars)))"
-                modelText = modelText.isEmpty ? block : block + "\n\n" + modelText
+                imageData = await Task.detached(priority: .userInitiated) {
+                    [img.jpegData(compressionQuality: 0.85)].compactMap { $0 }
+                }.value
+            } else {
+                imageData = []
+            }
+            let fileAttachments: [UserFileAttachment]
+            if let f = capturedFile {
+                fileAttachments = [UserFileAttachment(name: f.name, localURL: f.url)]
+            } else {
+                fileAttachments = []
             }
 
             // 回调只缓冲文本；约 20Hz 更新 UI，避免每个 token 新建主线程任务。
@@ -356,7 +437,9 @@ struct ChatView: View {
                 }
             }
             do {
-                let reply = try await app.pipeline.handle(userText: modelText) { delta in
+                let reply = try await app.pipeline.handle(userText: text,
+                                                          images: imageData,
+                                                          files: fileAttachments) { delta in
                     stream.append(delta)
                 }
                 updates.cancel()
@@ -370,6 +453,18 @@ struct ChatView: View {
             }
             busy = false
         }
+    }
+
+    /// 附件条上的提示文案：能不能直传一眼可见
+    private func sendHint(for url: URL) -> String {
+        let ext = url.pathExtension.lowercased()
+        if AttachmentExtractor.uploadPurpose(ext: ext) != nil {
+            return "发送时经 Files API 直传"
+        }
+        if AttachmentExtractor.isImageExt(ext) {
+            return "图片 · 发送时直传模型"
+        }
+        return "发送时按纯文本附上内容"
     }
 }
 
@@ -481,5 +576,48 @@ private final class ChatBackgroundImageCache: @unchecked Sendable {
         let cost = (image.cgImage?.bytesPerRow ?? 0) * (image.cgImage?.height ?? 0)
         images.setObject(image, forKey: key, cost: cost)
         return image
+    }
+}
+
+// MARK: - 拍摄（＋ 面板「拍摄」磁贴；真机可用，模拟器无摄像头只出黑屏）
+//
+/// UIImagePickerController 相机包装。拍完经 onImage 回 UIImage（已带 EXIF 方向修正，
+/// 由下游 AttachmentExtractor.image 统一处理）。
+struct CameraPicker: UIViewControllerRepresentable {
+    var onImage: (UIImage?) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    func makeUIViewController(context: Context) -> UIImagePickerController {
+        let picker = UIImagePickerController()
+        guard UIImagePickerController.isSourceTypeAvailable(.camera) else {
+            // 没摄像头（模拟器）：直接收起，不崩
+            DispatchQueue.main.async { dismiss() }
+            return picker
+        }
+        picker.sourceType = .camera
+        picker.mediaTypes = ["public.image"]
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) {}
+
+    func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
+
+    final class Coordinator: NSObject, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
+        let parent: CameraPicker
+        init(parent: CameraPicker) { self.parent = parent }
+
+        func imagePickerController(_ picker: UIImagePickerController,
+                                   didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) {
+            let image = info[.originalImage] as? UIImage
+            parent.onImage(image)
+            parent.dismiss()
+        }
+
+        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
+            parent.onImage(nil)
+            parent.dismiss()
+        }
     }
 }

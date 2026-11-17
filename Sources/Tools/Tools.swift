@@ -1,12 +1,28 @@
 import Foundation
 
+// MARK: - 工具（Function Calling）：模型可以主动调用的能力
+//
+// ┌─ 怎么给"她"加一个新工具（比如查快递、控制智能家居）────────────┐
+// │ 1. 在本文件仿照 WebSearchTool 写一个 struct，实现 AgentTool：      │
+// │      definition  → 告诉模型"我是什么、什么时候该调我、要什么参数"  │
+// │      run         → 真正干活，返回 JSON 字符串（出错也返回 JSON，   │
+// │                    让模型自己决定怎么跟用户解释）                  │
+// │ 2. 在 FenShenApp.init 里把实例加进 tools 数组                      │
+// │ 3. 完成。Pipeline 会自动把 definition 声明给模型，                  │
+// │    模型决定调用时经 DeepSeekClient.ask 的循环回调到 run             │
+// │ description 写得越清楚，模型触发越准；参数 schema 用 JSONValue 拼   │
+// └────────────────────────────────────────────────────────────────┘
+
 /// 工具协议：模型可以调用的能力（对应原项目 src/tools/）
 protocol AgentTool {
+    /// 声明给模型的"说明书"：名字 + 什么时候用 + 参数 JSON Schema
     var definition: ToolDefinition { get }
+    /// 真正执行。argumentsJSON 是模型给的参数（可能不完全合规，做好容错）
     func run(argumentsJSON: String) async -> String
 }
 
 /// 工具注册表：模型通过名字调用
+/// 注意：App 实际走的是 Pipeline 注入的 tools 数组，这个全局注册表是备用通道
 enum ToolRegistry {
     private static var tools: [String: AgentTool] = [:]
 

@@ -1,6 +1,14 @@
 import SwiftUI
 
 // MARK: - 聊天背景裁剪页（拖动平移 + 双指缩放 + 比例选择，所见即所得裁剪）
+//
+// 实现思路（想改裁剪交互先读这段）：
+// 交互视图里：图片按 scaledToFill 铺满裁剪框 × 用户缩放(scale)，offset 平移；
+// clamped() 保证图永远盖满框（不露底）。点「完成」时，用一个与交互视图
+// 结构完全一致的静态 CropCanvas（相同 frame/fit/scale/offset）交给
+// ImageRenderer 离屏渲染 —— 框里看到什么，导出就是什么，不需要手写
+// "屏幕坐标 → 图片像素"的换算。renderer.scale = 3 控制导出分辨率。
+// 想加新比例：CropAspect 加 case + ratio，选择器是 ForEach 自动生成。
 
 enum CropAspect: String, CaseIterable, Identifiable {
     case fullScreen = "全屏"

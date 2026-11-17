@@ -2,22 +2,56 @@ import Foundation
 import SwiftUI
 
 // MARK: - 设置（对应原项目 config/schema.js 的角色）
+//
+// 改动须知：
+// · 每个字段对应一个 UserDefaults key（见 didSet），改 key 名会导致老用户设置丢失；
+// · init 里的默认值只在「从未写过该 key」时生效——想让老安装也吃到新默认值，
+//   要么换 key 名，要么加版本迁移逻辑；
+// · 字段被谁消费：apiKey/baseURL/model → DeepSeekClient（调 API）；
+//   temperature → 请求体；maxHistory → MemoryStore.append（窗口压缩阈值）；
+//   autoSearch → Pipeline.handle（是否给模型声明 web_search 工具）。
+// · 想加新设置项：照下面三步——声明 @Published + didSet、init 读默认值、
+//   SettingsView 里加一行控件。
 
 @MainActor
 final class SettingsStore: ObservableObject {
     // AppStorage 是 View 的 DynamicProperty；放在 ObservableObject 内不会发布变更。
     // 保留原有 defaults key，同时让设置页及依赖这些设置的视图及时刷新。
     private let defaults: UserDefaults
-    @Published var apiKey: String { didSet { defaults.set(apiKey, forKey: "settings.apiKey") } }
+    /// API Key 属于敏感凭据：存 Keychain（见 Sources/Call/KeychainStore.swift），
+    /// 不进 UserDefaults / 不硬编码。首次启动自动把 UserDefaults 里的旧 key 迁移过来。
+    private let keychain: KeychainStore
+    @Published var apiKey: String {
+        didSet {
+            // Keychain 写失败（极端沙盒情况）退回 UserDefaults，宁可降级也不丢 Key
+            if (try? keychain.set(apiKey, account: "settings.apiKey")) != nil {
+                defaults.removeObject(forKey: "settings.apiKey")   // 迁移后从明文存储删除
+            } else {
+                defaults.set(apiKey, forKey: "settings.apiKey")
+            }
+        }
+    }
     @Published var baseURL: String { didSet { defaults.set(baseURL, forKey: "settings.baseURL") } }
     @Published var model: String { didSet { defaults.set(model, forKey: "settings.model") } }
     @Published var temperature: Double { didSet { defaults.set(temperature, forKey: "settings.temperature") } }
     @Published var maxHistory: Int { didSet { defaults.set(maxHistory, forKey: "settings.maxHistory") } }
     @Published var autoSearch: Bool { didSet { defaults.set(autoSearch, forKey: "settings.autoSearch") } }
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .standard, keychain: KeychainStore = KeychainStore()) {
         self.defaults = defaults
-        apiKey = defaults.string(forKey: "settings.apiKey") ?? ""
+        self.keychain = keychain
+        // Keychain 优先，其次迁移 UserDefaults 里的旧值，最后空串
+        if let fromKeychain = keychain.string(account: "settings.apiKey") {
+            apiKey = fromKeychain
+        } else if let legacy = defaults.string(forKey: "settings.apiKey"), !legacy.isEmpty {
+            apiKey = legacy
+            // 迁移：写进 Keychain 并从 UserDefaults 删除（didSet 会做这两件事）
+            if (try? keychain.set(legacy, account: "settings.apiKey")) != nil {
+                defaults.removeObject(forKey: "settings.apiKey")
+            }
+        } else {
+            apiKey = ""
+        }
         baseURL = defaults.string(forKey: "settings.baseURL") ?? "https://api.deepseek.com/v1"
         model = defaults.string(forKey: "settings.model") ?? "deepseek-flash"
         temperature = defaults.object(forKey: "settings.temperature") as? Double ?? 0.8
@@ -27,9 +61,15 @@ final class SettingsStore: ObservableObject {
 }
 
 // MARK: - 人设（对应 bridge/persona.md，可在 App 内编辑）
+//
+// 人设 = 每次请求 system 消息的第一段（拼装在 MemoryStore.contextMessages）。
+// 想改她的"出厂性格"：改下面 defaultPersona 的字符串。
+// 想看/改用户当前实际生效的人设：设置 → 人设 页（PersonaEditor）。
+// 持久化在 UserDefaults key "persona.md"（不是文件，名字只是沿用原项目习惯）。
 
 @MainActor
 final class PersonaStore: ObservableObject {
+    // 改这里 = 改"恢复默认"按钮恢复到的人设。缩进会进字符串，顶格写每行。
     static let defaultPersona = """
     你叫小深，是主人的数字分身助手，住在主人的 iPhone 里。
 
@@ -47,6 +87,16 @@ final class PersonaStore: ObservableObject {
 }
 
 // MARK: - 长期记忆（对应 src/store/memory.js：逐字窗口 + 滚动摘要 + 原子写）
+//
+// 记忆分两层（都是给模型看的上下文，见 contextMessages）：
+// · entries（逐字窗口）：最近 N 条原文。N = settings.maxHistory，设置页可调。
+//   超限时最老的一半被压进 summary（第 4 步在 append 里，见"滚动摘要"）。
+// · summary（滚动摘要）：更早对话的粗压缩，拼进 system 消息，上限 60 行。
+//
+// 持久化：Documents/memory/default.json，每次 append/删除都原子写全量。
+// contact 字段目前恒为 "default"——给"多联系人/多会话"预留的坑位：
+//   想做多会话：把 fileURL 按 contact 命名（default.json → <contact>.json），
+//   MemoryStore 按 contact 多实例化即可，UI 层要加会话列表。
 
 struct MemoryRecord: Codable {
     struct Entry: Codable {
@@ -98,10 +148,14 @@ final class MemoryStore: ObservableObject {
         // 防止损坏/旧版本设置使 prefix/removeFirst 收到负数，且至少保留当前消息。
         let maxHistory = max(2, maxHistory)
         record.entries.append(.init(role: role, content: content, time: Date()))
-        // 逐字窗口超限：把最老的一半压成摘要（滚动摘要）
+        // 逐字窗口超限：把最老的一半压成摘要（滚动摘要）。
+        // 注意：这里的"压缩"只是把老对话原文逐行拼进 summary，没有用模型总结——
+        // 想要更聪明的摘要（让模型把老对话浓缩成几句话），在这里发一次后台
+        // DeepSeek 请求替换 digest 内容即可，注意别阻塞 append。
         if record.entries.count > maxHistory {
             let old = record.entries.prefix(record.entries.count - maxHistory / 2)
             let digest = old.map { "\($0.role): \($0.content)" }.joined(separator: "\n")
+            // suffix(60)：摘要最多保留最近 60 行，防止无限膨胀吃 token
             record.summary = (record.summary + "\n" + digest)
                 .split(separator: "\n").suffix(60).joined(separator: "\n")
             record.entries.removeFirst(record.entries.count - maxHistory / 2)
@@ -110,6 +164,8 @@ final class MemoryStore: ObservableObject {
     }
 
     /// 组装发给模型的上下文：system(人设+摘要) + 窗口
+    /// 模型看到的完整结构 = [人设+摘要(system)] + [窗口内逐条对话]
+    /// Pipeline.handle 会在拿到这个数组后，把最后一条 user 替换成带图片/文件块的版本
     func contextMessages(persona: String) -> [ChatMessage] {
         var sys = persona
         if !record.summary.isEmpty {
@@ -248,6 +304,14 @@ final class UsageStore: ObservableObject {
 }
 
 // MARK: - 聊天背景（设置 → 聊天背景；纯色 / 渐变 / 相册自定义）
+//
+// 想加一种新背景（三处都要改）：
+//   1. 这个 enum 加 case + name 中文名；
+//   2. ChatView.chatBackgroundLayer 的 switch 加对应视图（真正生效的地方）；
+//   3. ChatBackgroundView.preview 的 switch 加缩略图。
+// 自定义照片有两个文件：chat_bg_original.jpg（相册原图，供反复重裁）和
+// chat_bg.jpg（裁剪后的成品，实际显示）。imageRevision 用于让 CustomChatBackground
+// 在文件内容变化时重新读盘（同路径重写 UIImage 有缓存，不加会显示旧图）。
 
 enum ChatBackgroundStyle: String, CaseIterable, Identifiable {
     case system, warm, mint, sakura, aurora, night, custom

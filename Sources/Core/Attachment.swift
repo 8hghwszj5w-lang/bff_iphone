@@ -5,6 +5,13 @@ import PDFKit
 import ImageIO
 
 // MARK: - 附件内容提取（全部本机完成，不消耗额外 API：图片走 Vision OCR，PDF 走 PDFKit，其余按纯文本）
+//
+// 当前主链路：图片/常见文档已改为直传 DeepSeek（见 Pipeline.handle + uploadPurpose），
+// 这里主要剩两类工作：
+// · uploadPurpose  决定每个扩展名走 Files API 哪个 purpose（改支持范围就看它）
+// · fileText       直传不支持/上传失败时的本地纯文本兜底
+// ocr()/image() 目前不在发送链路上（直传后模型自己"看图"），
+// ocr 保留是因为以后若要做"图片文字提取给 v4-pro"的降级方案可以直接用。
 
 enum AttachmentError: LocalizedError {
     case binaryFile
@@ -91,6 +98,28 @@ enum AttachmentExtractor {
         case .rightMirrored: return .rightMirrored
         @unknown default: return .up
         }
+    }
+
+    /// 按扩展名决定 Files API 的 purpose（见官方 Files API 文档）；
+    /// 返回 nil 表示该类型不能直传，走本地纯文本兜底。
+    static func uploadPurpose(ext: String) -> String? {
+        switch ext {
+        // PDF / Word / PPT → 官方解析通道（只取文字）
+        case "pdf", "doc", "docx", "ppt", "pptx":
+            return "text_recognition"
+        // 纯文本 / 代码 / 表格 / 电子书 → user_data
+        case "txt", "md", "csv", "json", "log", "yaml", "yml", "html", "xml", "toml", "ini",
+             "ts", "js", "py", "swift", "java", "c", "h", "cpp", "go", "rs", "rb", "php", "sh",
+             "xlsx", "xls", "epub", "mobi":
+            return "user_data"
+        default:
+            return nil
+        }
+    }
+
+    /// 图片扩展名（可转 base64 内联，或经 user_data 直传）
+    static func isImageExt(_ ext: String) -> Bool {
+        ["jpg", "jpeg", "png", "gif", "webp"].contains(ext)
     }
 
     /// 文件 → 文本（PDF 走 PDFKit；其他按 UTF-8 纯文本，拒绝二进制）。后台调用。

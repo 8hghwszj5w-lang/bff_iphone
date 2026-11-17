@@ -80,14 +80,16 @@ final class StoreTests: XCTestCase {
 
     @MainActor func testSettingsPublishAndKeepPersistedValuesIncludingZeroAndFalse() async {
         let defaults = isolatedDefaults()
-        let store = SettingsStore(defaults: defaults)
+        let keychain = KeychainStore(service: "FenShenStoreTests.\(UUID().uuidString)")
+        addTeardownBlock { keychain.remove(account: "settings.apiKey") }
+        let store = SettingsStore(defaults: defaults, keychain: keychain)
         var changes = 0
         let subscription = store.objectWillChange.sink { changes += 1 }
         store.temperature = 0
         store.autoSearch = false
         store.apiKey = "test-only"
         store.maxHistory = 80
-        let reloaded = SettingsStore(defaults: defaults)
+        let reloaded = SettingsStore(defaults: defaults, keychain: keychain)
         XCTAssertEqual(reloaded.temperature, 0)
         XCTAssertFalse(reloaded.autoSearch)
         XCTAssertEqual(reloaded.apiKey, "test-only")
