@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		05EF7F02DABBEF7AB959D7B8 /* ScheduleGenerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB776352D84827CE19578D77 /* ScheduleGenerator.swift */; };
 		08B370E8AA24CB6C911E188C /* TTSEngines.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0091E7C3BDD84CBDA2A6A4CF /* TTSEngines.swift */; };
 		09AA450D95DF34C1B80697BF /* PhoneView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CB96EDD34C6BAEBBDBF6400F /* PhoneView.swift */; };
 		19A29C36B5EC75542F33A90D /* CallComparisonView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3DBF822320CE75E31CDECC82 /* CallComparisonView.swift */; };
@@ -38,6 +39,7 @@
 		F7FDD9E9637194B16FC13E55 /* ScheduleTools.swift in Sources */ = {isa = PBXBuildFile; fileRef = 756785137AF93D9E425EDA57 /* ScheduleTools.swift */; };
 		F92F2D4942E430DD6D0976F6 /* Tools.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE07E2F1C4B4908B8827529E /* Tools.swift */; };
 		FCE3C7E483D76D4040674D97 /* Protocols.swift in Sources */ = {isa = PBXBuildFile; fileRef = D11979D44E7CCB6B7EE2ECA9 /* Protocols.swift */; };
+		FE0F9F95C79AD83ABDEEB7B1 /* ScheduleGenerateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9376BE30CB343345A5DFD4E4 /* ScheduleGenerateTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -71,6 +73,7 @@
 		756785137AF93D9E425EDA57 /* ScheduleTools.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScheduleTools.swift; sourceTree = "<group>"; };
 		8C7784DC2E4A53E064642005 /* Pipeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Pipeline.swift; sourceTree = "<group>"; };
 		8DC52887C3AE673EFEC49BE6 /* Stores.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Stores.swift; sourceTree = "<group>"; };
+		9376BE30CB343345A5DFD4E4 /* ScheduleGenerateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScheduleGenerateTests.swift; sourceTree = "<group>"; };
 		9B09EF44AA2A89DD5A8CE473 /* FenShen.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = FenShen.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		9BFDA391D654DA76055D66E3 /* Attachment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Attachment.swift; sourceTree = "<group>"; };
 		C2E531CA0129A3295FBEE302 /* KeychainStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainStore.swift; sourceTree = "<group>"; };
@@ -83,6 +86,7 @@
 		DE07E2F1C4B4908B8827529E /* Tools.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Tools.swift; sourceTree = "<group>"; };
 		DE14082766B37BA7BB2CE82E /* LLMClients.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LLMClients.swift; sourceTree = "<group>"; };
 		E278B94DB1C581858BCCCDCF /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		EB776352D84827CE19578D77 /* ScheduleGenerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScheduleGenerator.swift; sourceTree = "<group>"; };
 		EBBC15E3D6452A8357A82167 /* StreamingAudioPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamingAudioPlayer.swift; sourceTree = "<group>"; };
 		FFD800CDB8E2BD3DD76A66CC /* DeepSeekClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeepSeekClient.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -131,6 +135,7 @@
 				54ABC88F542F63F7A51A68F1 /* AudioLifecycleTests.swift */,
 				5C12DAEC59C4DA386C478EB7 /* CallTests.swift */,
 				0FDC3DC073600D037767E531 /* NetworkTests.swift */,
+				9376BE30CB343345A5DFD4E4 /* ScheduleGenerateTests.swift */,
 				0E08A9873CEF8DBA1759FA7C /* ScheduleTests.swift */,
 				2F42EAC2DEB4D7586EECC46B /* SpeechSessionTests.swift */,
 				C6AFD55550004A51D5BD1D56 /* StoreTests.swift */,
@@ -159,6 +164,7 @@
 		B9B2DD5DA677D6AE4C8A313D /* Schedule */ = {
 			isa = PBXGroup;
 			children = (
+				EB776352D84827CE19578D77 /* ScheduleGenerator.swift */,
 				67B4BB10D431FDE46E37D7F3 /* ScheduleModels.swift */,
 				58B7DF8F6D30B957FFBE5B7A /* ScheduleStore.swift */,
 				756785137AF93D9E425EDA57 /* ScheduleTools.swift */,
@@ -310,6 +316,7 @@
 				09AA450D95DF34C1B80697BF /* PhoneView.swift in Sources */,
 				3A6A718D65A7E01C32E67272 /* Pipeline.swift in Sources */,
 				FCE3C7E483D76D4040674D97 /* Protocols.swift in Sources */,
+				05EF7F02DABBEF7AB959D7B8 /* ScheduleGenerator.swift in Sources */,
 				A2056FBAE378383E0668AAC9 /* ScheduleModels.swift in Sources */,
 				F7042391F60A5503D6D86B7E /* SchedulePageView.swift in Sources */,
 				889D4881DCBF7869DCD8D574 /* ScheduleStore.swift in Sources */,
@@ -331,6 +338,7 @@
 				6DF2A05FD479A2D2E55218A9 /* AudioLifecycleTests.swift in Sources */,
 				7216A059D343ED73C67458B6 /* CallTests.swift in Sources */,
 				453E195FC207CF8FC29F691F /* NetworkTests.swift in Sources */,
+				FE0F9F95C79AD83ABDEEB7B1 /* ScheduleGenerateTests.swift in Sources */,
 				78FBF62385EDB5678F98D9DF /* ScheduleTests.swift in Sources */,
 				AB689661DB12A866FF1D35BB /* SpeechSessionTests.swift in Sources */,
 				280C10B4B5812061D780D4F3 /* StoreTests.swift in Sources */,

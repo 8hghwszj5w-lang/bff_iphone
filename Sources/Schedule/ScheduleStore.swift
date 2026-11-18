@@ -220,10 +220,9 @@ final class ScheduleStore: ObservableObject {
     }
 }
 
-private extension String {
+extension String {
     /// "yyyy-MM-dd" → Date（本地时区零点）；解析失败返回 nil
-    func toDate() -> Date? {
-        let f = DateFormatter()
+    func toDate() -> Date? {        let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd"
         f.timeZone = .current
         f.locale = Locale(identifier: "en_US_POSIX")

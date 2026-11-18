@@ -49,6 +49,10 @@ struct DaySchedule: Codable, Equatable {
     var mood: String? = nil
     var items: [ScheduleItem] = []
     var changes: [ScheduleChange]? = nil
+    /// "llm"（模型生成）/"template"（失败兜底模板）/"manual"（手编辑）
+    var source: String? = nil
+    var generationError: String? = nil
+    var generatedAt: Date? = nil
 
     func findItem(atMinute minute: Int) -> Int {
         items.firstIndex { minute >= $0.startMinute && minute < $0.endMinute } ?? -1

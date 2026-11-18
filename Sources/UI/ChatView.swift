@@ -81,6 +81,8 @@ struct ChatView: View {
                         ChatMessageView(role: $0.role, text: $0.content)
                     }
                 }
+                // 自动日程生成：今天没日程立刻补，22:00 后补明天（内部有冷却，幂等）
+                app.autoGenerateSchedule()
             }
             .alert("出错了", isPresented: .init(get: { error != nil }, set: { if !$0 { error = nil } })) {
                 Button("好", role: .cancel) {}

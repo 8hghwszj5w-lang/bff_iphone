@@ -19,6 +19,10 @@ struct SchedulePageView: View {
     @State private var title = ""
     @State private var mood = ""
     @State private var showInjectionPreview = false
+    @State private var generateTypeID = "workday"
+    @State private var generationHint = ""
+    @State private var generating = false
+    @State private var generationError: String?
 
     private var dateKey: String {
         let date = Calendar.current.date(byAdding: .day, value: dayOffset, to: Date()) ?? Date()
@@ -94,6 +98,41 @@ struct SchedulePageView: View {
             } footer: {
                 Text("注入预览 = 每轮对话真正拼进 system 消息的「生活背景」文本。")
             }
+
+            // 自动生成（对应桌面端 generate.js：加权挑类型 → LLM → JSON → 模板兜底）
+            Section {
+                Picker("类型", selection: $generateTypeID) {
+                    ForEach(ScheduleDayType.defaults) { type in
+                        Text(type.name).tag(type.id)
+                    }
+                }
+                TextField("特别要求（可选，优先满足）", text: $generationHint)
+                Button {
+                    generateCurrentDay()
+                } label: {
+                    HStack {
+                        if generating { ProgressView().padding(.trailing, 6) }
+                        Text(generating ? "正在生成…" : "生成这一天的日程")
+                    }
+                }
+                .disabled(generating)
+                if let genError = generationError {
+                    Text(genError).font(.footnote).foregroundStyle(.orange)
+                }
+                if let source = day.source {
+                    HStack(spacing: 6) {
+                        Image(systemName: source == "llm" ? "sparkles" : "doc.text")
+                        Text(source == "llm" ? "由模型生成"
+                             : source == "template" ? "来自兜底模板（模型当时不可用）" : source)
+                            .font(.caption)
+                    }
+                    .foregroundStyle(.secondary)
+                }
+            } header: {
+                Text("自动生成（\(dayOffset == 0 ? "今天" : "明天")）")
+            } footer: {
+                Text("每晚 22:00 后打开 App 会自动生成明天的日程（加权挑类型 + 避开最近三天）；失败 20 分钟后重试。这里可以手动指定类型重新生成。")
+            }
         }
         .navigationTitle("每日日程")
         .navigationBarTitleDisplayMode(.inline)
@@ -147,5 +186,34 @@ struct SchedulePageView: View {
     private func minutes(_ date: Date) -> Int {
         Calendar.current.component(.hour, from: date) * 60
             + Calendar.current.component(.minute, from: date)
+    }
+
+    /// 手动「生成这一天的日程」：指定类型 + 特别要求，走同一套生成器（LLM 失败落模板）
+    private func generateCurrentDay() {
+        guard !generating else { return }
+        generating = true
+        generationError = nil
+        let hint = generationHint.isEmpty ? nil : generationHint
+        let typeID = generateTypeID
+        let key = dateKey
+        let persona = app.persona.text
+        let client = DeepSeekClient(settings: app.settings)
+        Task {
+            let day = try await ScheduleGenerator.generateDay(
+                dateKey: key, persona: persona, characterName: "小深",
+                client: { prompt in
+                    let (text, _) = try await client.ask(messages: [.user(prompt)],
+                                                         tools: [],
+                                                         toolRunner: { _, _ in "" })
+                    return text
+                },
+                store: store, dayTypeId: typeID, hint: hint)
+            // 失败落了模板时把错误透出给用户看（成功时 source==llm 无错误）
+            if let genError = day.generationError {
+                generationError = "模型生成失败（\(genError)），已用「\(day.dayTypeName ?? "")」模板兜底。"
+            }
+            syncDayFields()
+            generating = false
+        }
     }
 }

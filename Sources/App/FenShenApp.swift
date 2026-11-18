@@ -77,4 +77,21 @@ final class AppState: ObservableObject {
                 .store(in: &storeSubscriptions)
         }
     }
+
+    /// 自动日程生成（对应桌面端 runner.js）：今天没日程立刻补；到 22:00 后补明天；
+    /// 失败 20 分钟冷却。ChatView.onAppear 触发，幂等且不阻塞聊天。
+    func autoGenerateSchedule() {
+        let persona = persona.text
+        let client = DeepSeekClient(settings: settings)
+        Task {
+            await ScheduleGenerator.autoFill(
+                store: schedule, persona: persona, characterName: "小深",
+                ask: { prompt in
+                    let (text, _) = try await client.ask(messages: [.user(prompt)],
+                                                         tools: [],
+                                                         toolRunner: { _, _ in "" })
+                    return text
+                })
+        }
+    }
 }
