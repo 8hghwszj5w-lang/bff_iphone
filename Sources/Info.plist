@@ -32,10 +32,20 @@
 		<key>NSAllowsArbitraryLoads</key>
 		<true/>
 	</dict>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>让 AI 查看与添加日历日程</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>让 AI 查看与添加日历日程</string>
+	<key>NSCalendarsWriteOnlyAccessUsageDescription</key>
+	<string>让 AI 添加日历日程</string>
 	<key>NSCameraUsageDescription</key>
 	<string>拍摄照片发给 AI 助手</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>语音通话需要使用麦克风听你说话</string>
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>让 AI 查看与添加提醒事项</string>
+	<key>NSRemindersUsageDescription</key>
+	<string>让 AI 查看与添加提醒事项</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>把你说的话转成文字，便于 AI 理解与回复</string>
 	<key>UISupportedInterfaceOrientations</key>

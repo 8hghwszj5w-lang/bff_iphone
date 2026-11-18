@@ -60,13 +60,16 @@ final class AppState: ObservableObject {
         self.schedule = schedule
         let search = WebSearchTool()
         let client = DeepSeekClient(settings: settings)
-        // tools 里的受「允许联网搜索」开关控制；alwaysTools 是常驻工具（日程记事）
-        // 想加新工具：在这里往 tools（受开关）或 alwaysTools（常驻）里加
+        // tools 里的受「允许联网搜索」开关控制；alwaysTools 是常驻工具（日程记事 +
+        // 本机日历/提醒/备忘录）。想加新工具：在这里往 tools（受开关）或 alwaysTools（常驻）里加
         self.pipeline = Pipeline(client: client, memory: memory,
                                  persona: persona, tools: [search],
                                  settings: settings, usage: usage,
                                  alwaysTools: [ScheduleAdjustTool(store: schedule),
-                                               ScheduleViewTool(store: schedule)],
+                                               ScheduleViewTool(store: schedule),
+                                               CalendarReadTool(), CalendarCreateTool(),
+                                               RemindersReadTool(), RemindersCreateTool(),
+                                               NotesSearchTool()],
                                  schedule: schedule)
         // EnvironmentObject 不会自动观察嵌套 ObservableObject。
         // 只转发 store 变更；流式文本仍局限在 ChatView 的本地状态。

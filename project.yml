@@ -21,6 +21,11 @@ targets:
         NSMicrophoneUsageDescription: "语音通话需要使用麦克风听你说话"
         NSCameraUsageDescription: "拍摄照片发给 AI 助手"
         NSSpeechRecognitionUsageDescription: "把你说的话转成文字，便于 AI 理解与回复"
+        NSCalendarsUsageDescription: "让 AI 查看与添加日历日程"
+        NSCalendarsFullAccessUsageDescription: "让 AI 查看与添加日历日程"
+        NSCalendarsWriteOnlyAccessUsageDescription: "让 AI 添加日历日程"
+        NSRemindersUsageDescription: "让 AI 查看与添加提醒事项"
+        NSRemindersFullAccessUsageDescription: "让 AI 查看与添加提醒事项"
         LSApplicationQueriesSchemes:
           - weixin
           - weixinulapi
