@@ -1,0 +1,151 @@
+import SwiftUI
+
+// MARK: - 每日日程管理页（对应桌面端插件「设置 → 每日日程」的精简版）
+//
+// 结构：今天/明天切换 → 时间线列表（此刻高亮）→ 添加一段 → 这一天的主题/心情。
+// 所有编辑都走 ScheduleStore.adjust（同插件语义：截断/拆开被覆盖的时段，
+// 手动编辑也会记入 changes）。想看注入给模型的真实文本 → 底部「注入预览」。
+
+struct SchedulePageView: View {
+    @EnvironmentObject private var app: AppState
+    let store: ScheduleStore
+
+    @State private var dayOffset = 0                       // 0=今天 1=明天
+    @State private var newStart = Date()
+    @State private var newEnd = Date()
+    @State private var newActivity = ""
+    @State private var newLocation = ""
+    @State private var dayTypeName = ""
+    @State private var title = ""
+    @State private var mood = ""
+    @State private var showInjectionPreview = false
+
+    private var dateKey: String {
+        let date = Calendar.current.date(byAdding: .day, value: dayOffset, to: Date()) ?? Date()
+        return ScheduleStore.dateKey(for: date)
+    }
+    private var day: DaySchedule {
+        store.loadDay(dateKey: dateKey) ?? DaySchedule(date: dateKey)
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                Picker("哪一天", selection: $dayOffset) {
+                    Text("今天").tag(0)
+                    Text("明天").tag(1)
+                }
+                .pickerStyle(.segmented)
+            }
+
+            Section("这一天是什么日子") {
+                TextField("类型（上班日 / 休息日…）", text: $dayTypeName)
+                TextField("一句话概括今天", text: $title)
+                TextField("心情（可选）", text: $mood)
+                Button("保存主题") {
+                    var day = self.day
+                    day.dayTypeName = dayTypeName.isEmpty ? nil : dayTypeName
+                    day.title = title.isEmpty ? nil : title
+                    day.mood = mood.isEmpty ? nil : mood
+                    store.saveDay(day)
+                }
+                .disabled(dayTypeName.isEmpty && title.isEmpty && mood.isEmpty)
+            }
+
+            Section {
+                if day.items.isEmpty {
+                    Text("这一天还没有安排").font(.footnote).foregroundStyle(.secondary)
+                } else {
+                    ForEach(Array(day.items.enumerated()), id: \.offset) { index, item in
+                        timelineRow(index: index, item: item)
+                    }
+                    .onDelete { store.removeItems(dateKey: dateKey, offsets: $0) }
+                }
+            } header: {
+                Text(dateKey)
+            } footer: {
+                Text("左滑删除一条；删除后的空档会自动补「在家休息 / 睡觉」。")
+            }
+
+            Section {
+                DatePicker("开始", selection: $newStart, displayedComponents: .hourAndMinute)
+                DatePicker("结束", selection: $newEnd, displayedComponents: .hourAndMinute)
+                TextField("做什么（必填）", text: $newActivity)
+                TextField("在哪（可选）", text: $newLocation)
+                Button("添加到 \(dateKey)") {
+                    store.adjust(dateKey: dateKey,
+                                 start: ScheduleItem.clock(minutes: minutes(newStart)),
+                                 end: ScheduleItem.clock(minutes: minutes(newEnd)),
+                                 activity: newActivity,
+                                 note: "手动添加",
+                                 location: newLocation.isEmpty ? nil : newLocation)
+                    newActivity = ""
+                    newLocation = ""
+                }
+                .disabled(newActivity.isEmpty || minutes(newEnd) <= minutes(newStart))
+            } header: {
+                Text("添加一段")
+            } footer: {
+                Text("添加走的是「覆盖时间段」逻辑：与现有安排重叠的部分会被截断或拆开。")
+            }
+
+            Section {
+                Button("查看注入预览") { showInjectionPreview = true }
+            } footer: {
+                Text("注入预览 = 每轮对话真正拼进 system 消息的「生活背景」文本。")
+            }
+        }
+        .navigationTitle("每日日程")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear(perform: syncDayFields)
+        .onChange(of: dayOffset) { _ in syncDayFields() }
+        .sheet(isPresented: $showInjectionPreview) {
+            NavigationStack {
+                ScrollView {
+                    Text(store.injectionText(now: Date()))
+                        .font(.footnote.monospaced())
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding()
+                }
+                .navigationTitle("注入预览")
+                .navigationBarTitleDisplayMode(.inline)
+            }
+        }
+    }
+
+    private func timelineRow(index: Int, item: ScheduleItem) -> some View {
+        let nowMinute = Calendar.current.component(.hour, from: Date()) * 60
+            + Calendar.current.component(.minute, from: Date())
+        let isCurrent = dayOffset == 0 && item.startMinute <= nowMinute && nowMinute < item.endMinute
+        return HStack {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("\(item.start)–\(item.end)  \(item.activity)\(item.placeLabel)")
+                    .font(.subheadline)
+                    .fontWeight(isCurrent ? .semibold : .regular)
+                if let detail = item.detail, !detail.isEmpty {
+                    Text(detail).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            Spacer()
+            if isCurrent {
+                Text("此刻")
+                    .font(.caption2.bold())
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 8).padding(.vertical, 3)
+                    .background(Color.accentColor, in: Capsule())
+            }
+        }
+    }
+
+    private func syncDayFields() {
+        let day = store.loadDay(dateKey: dateKey)
+        dayTypeName = day?.dayTypeName ?? (dayOffset == 0 ? "上班日" : "休息日")
+        title = day?.title ?? ""
+        mood = day?.mood ?? ""
+    }
+
+    private func minutes(_ date: Date) -> Int {
+        Calendar.current.component(.hour, from: date) * 60
+            + Calendar.current.component(.minute, from: date)
+    }
+}

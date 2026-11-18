@@ -14,13 +14,19 @@ final class Pipeline: ObservableObject {
     private let memory: MemoryStore
     private let persona: PersonaStore
     private let tools: [AgentTool]
+    /// 常驻工具（如日程记事）：不受「允许联网搜索」开关影响，永远声明给模型
+    private let alwaysTools: [AgentTool]
     private let settings: SettingsStore
     private let usage: UsageStore
+    /// 每日日程：每轮把"她此刻的生活背景"注入 system 消息
+    private let schedule: ScheduleStore?
 
     init(client: DeepSeekClient, memory: MemoryStore, persona: PersonaStore,
-         tools: [AgentTool], settings: SettingsStore, usage: UsageStore) {
+         tools: [AgentTool], settings: SettingsStore, usage: UsageStore,
+         alwaysTools: [AgentTool] = [], schedule: ScheduleStore? = nil) {
         self.client = client; self.memory = memory; self.persona = persona
-        self.tools = tools; self.settings = settings; self.usage = usage
+        self.tools = tools; self.alwaysTools = alwaysTools
+        self.settings = settings; self.usage = usage; self.schedule = schedule
     }
 
     /// 处理一条用户消息，流式返回回复文本。返回最终完整回复。
@@ -45,7 +51,9 @@ final class Pipeline: ObservableObject {
                 files: [UserFileAttachment] = [],
                 onDelta: @escaping (String) -> Void) async throws -> String {
         try Task.checkCancellation()
-        let defs = settings.autoSearch ? tools.map(\.definition) : []
+        // 常驻工具（日程记事）始终声明；搜索工具受「允许联网搜索」开关控制
+        let allToolPool = tools + alwaysTools
+        let defs = (settings.autoSearch ? tools.map(\.definition) : []) + alwaysTools.map(\.definition)
 
         // 图像理解仅 deepseek-flash 支持；提前给出明确指引而不是让 API 报错
         if !images.isEmpty, settings.model.lowercased().contains("v4-pro") {
@@ -105,8 +113,9 @@ final class Pipeline: ObservableObject {
         }
 
         memory.append(role: "user", content: memoryText, maxHistory: settings.maxHistory)
-        // contextMessages 组出 system + 历史窗口；都是纯文本
-        var context = memory.contextMessages(persona: persona.text)
+        // contextMessages 组出 system（人设 + 日程背景 + 记忆摘要）+ 历史窗口；都是纯文本
+        let scheduleBlock = schedule?.injectionText(now: Date()) ?? ""
+        var context = memory.contextMessages(persona: persona.text, scheduleBlock: scheduleBlock)
         // 直传块只作用于本轮请求：最近一条用户消息替换为带块的版本。
         // （历史消息保持纯文本——base64 太大，file_id 已过期会报错）
         if !parts.isEmpty, let idx = context.lastIndex(where: { $0.role == "user" }) {
@@ -115,7 +124,7 @@ final class Pipeline: ObservableObject {
 
         let (reply, usage) = try await client.ask(messages: context, tools: defs,
                                                   toolRunner: { name, args in
-                                                      guard let tool = self.tools.first(where: { $0.definition.function.name == name }) else {
+                                                      guard let tool = allToolPool.first(where: { $0.definition.function.name == name }) else {
                                                           return "{\"error\": \"unknown tool\"}"
                                                       }
                                                       return await tool.run(argumentsJSON: args)

@@ -73,6 +73,19 @@ struct SettingsView: View {
                                 .foregroundStyle(.secondary)
                         }
                     }
+                    NavigationLink {
+                        SchedulePageView(store: app.schedule)
+                    } label: {
+                        HStack {
+                            Label("每日日程", systemImage: "calendar")
+                            Spacer()
+                            Text(app.schedule.currentDay.items.isEmpty
+                                 ? "未设置" : "\(app.schedule.currentDay.items.count) 段")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                    }
                 }
                 Section {
                     NavigationLink {

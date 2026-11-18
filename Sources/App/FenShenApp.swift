@@ -42,6 +42,7 @@ final class AppState: ObservableObject {
     var persona: PersonaStore
     var pipeline: Pipeline
     var usage: UsageStore
+    var schedule: ScheduleStore
     var chatBackground = ChatBackgroundStore()
     // 持有 Combine 订阅，否则 sink 会被立即释放、UI 不再刷新
     private var storeSubscriptions = Set<AnyCancellable>()
@@ -54,17 +55,24 @@ final class AppState: ObservableObject {
             .urls(for: .documentDirectory, in: .userDomainMask)[0]
         self.memory = MemoryStore(directory: docs.appendingPathComponent("memory", isDirectory: true))
         self.usage = UsageStore(directory: docs)
+        // 每日日程（对应桌面端 dsh-daily-schedule）：一天一个 JSON，持久化在 Documents/schedule/
+        let schedule = ScheduleStore(directory: docs.appendingPathComponent("schedule", isDirectory: true))
+        self.schedule = schedule
         let search = WebSearchTool()
         let client = DeepSeekClient(settings: settings)
-        // 想加新工具：在这里往 tools 数组里多放一个（实现 AgentTool 协议即可）
+        // tools 里的受「允许联网搜索」开关控制；alwaysTools 是常驻工具（日程记事）
+        // 想加新工具：在这里往 tools（受开关）或 alwaysTools（常驻）里加
         self.pipeline = Pipeline(client: client, memory: memory,
                                  persona: persona, tools: [search],
-                                 settings: settings, usage: usage)
+                                 settings: settings, usage: usage,
+                                 alwaysTools: [ScheduleAdjustTool(store: schedule),
+                                               ScheduleViewTool(store: schedule)],
+                                 schedule: schedule)
         // EnvironmentObject 不会自动观察嵌套 ObservableObject。
         // 只转发 store 变更；流式文本仍局限在 ChatView 的本地状态。
         for publisher in [settings.objectWillChange, memory.objectWillChange,
                           persona.objectWillChange, usage.objectWillChange,
-                          chatBackground.objectWillChange] {
+                          schedule.objectWillChange, chatBackground.objectWillChange] {
             publisher.sink { [weak self] _ in self?.objectWillChange.send() }
                 .store(in: &storeSubscriptions)
         }
