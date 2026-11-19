@@ -23,6 +23,93 @@ enum SpeechSessionFactory {
     }
 }
 
+// MARK: - 音频环境事件（来电打断 / 路由切换 / 媒体服务失效）
+//
+// 真机上通话最常见的闪退不是 Swift 代码崩，而是：来电、闹钟、Siri 打断或
+// 耳机/蓝牙插拔后，AVAudioEngine 的 IO 线程带着失效的音频对象继续跑，
+// 触发 CoreAudio 底层异常（com.apple.coreaudio.avfaudio / AURemoteIO 崩溃，
+// 没有 Swift 栈可捕获）。所以必须在事件到达的第一时间停 tap/engine，
+// 把状态机收干净，再决定「结束通话并提示」还是「跟随新路由自动重启」。
+
+/// 纯逻辑判定：给定环境事件 + 当前收音状态 → 应对动作。离线可测。
+struct AudioEnvironmentPolicy {
+    enum Event: Equatable {
+        case interruptionBegan         // 来电 / 闹钟 / Siri 打断
+        case mediaServicesInvalidated  // 系统音频服务失效或重启（音频对象全体作废）
+        case routeChanged              // 耳机 / 蓝牙插拔
+    }
+    enum Action: Equatable {
+        case endAndNotify(String)      // 结束收音并把提示交给 VM 结束通话
+        case restart                   // 结束当前代次后立刻按新路由重启收音
+        case ignore
+    }
+
+    /// captureWanted：本代次是否期望收音。VM 主动 stop 后为 false，用于忽略
+    /// 挂断之后才送达的迟到事件，防止通话被「复活」或出现僵尸重启。
+    func action(for event: Event, captureWanted: Bool, isRunning: Bool) -> Action {
+        // 没在收音（准备中 / 已挂断）时任何事件都不动作：启动期间的
+        // setActive(true) 也可能触发路由变化通知，不能误杀正在启动的会话。
+        guard captureWanted else { return .ignore }
+        switch event {
+        case .interruptionBegan:
+            // 打断期间音频对象不可用，继续持有只会埋雷；结束通话让用户重新开始。
+            // （打断结束的自动续播需要完整重建引擎，风险大于收益，暂不做）
+            return .endAndNotify("通话被来电或其他应用打断，已结束，请重新开始")
+        case .mediaServicesInvalidated:
+            return .endAndNotify("系统音频服务异常，通话已结束，请重新开始")
+        case .routeChanged:
+            // 只有真正跑起来的收音才需要跟随路由重启；准备中的变化无害，忽略。
+            return isRunning ? .restart : .ignore
+        }
+    }
+}
+
+/// 订阅系统音频环境通知，统一投回主线程。会话持有它，释放时自动注销。
+@MainActor
+final class AudioEnvironmentWatcher {
+    private var tokens: [NSObjectProtocol] = []
+
+    init(onInterruptionBegan: @escaping @MainActor () -> Void,
+         onRouteChanged: @escaping @MainActor () -> Void,
+         onMediaServicesInvalidated: @escaping @MainActor () -> Void) {
+        let center = NotificationCenter.default
+        // interruption 的 .began/.ended 在这里分流：.ended 不续播（见策略注释）。
+        tokens.append(center.addObserver(
+            forName: AVAudioSession.interruptionNotification, object: nil, queue: nil) { note in
+            let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
+            guard let raw, AVAudioSession.InterruptionType(rawValue: raw) == .began else { return }
+            Task { @MainActor in onInterruptionBegan() }
+        })
+        tokens.append(center.addObserver(
+            forName: AVAudioSession.routeChangeNotification, object: nil, queue: nil) { _ in
+            Task { @MainActor in onRouteChanged() }
+        })
+        for name in [AVAudioSession.mediaServicesWereLostNotification,
+                     AVAudioSession.mediaServicesWereResetNotification] {
+            tokens.append(center.addObserver(forName: name, object: nil, queue: nil) { _ in
+                Task { @MainActor in onMediaServicesInvalidated() }
+            })
+        }
+    }
+
+    deinit {
+        // removeObserver 线程安全；通知可能在任意线程投递，不能等主线程。
+        for token in tokens { NotificationCenter.default.removeObserver(token) }
+    }
+}
+
+/// installTap 对 0Hz / 0 声道的输入格式会直接抛 ObjC 异常（无法 catch → 闪退）。
+/// 音频会话未激活、麦克风路由缺失、被其他引擎占用时都可能出现这种格式，
+/// 必须先校验，把崩溃转换成可捕获的错误（走既有的 failCall / 回退路径）。
+private func validatedMicFormat(of node: AVAudioInputNode) throws -> AVAudioFormat {
+    let format = node.outputFormat(forBus: 0)
+    guard format.sampleRate > 0, format.channelCount > 0 else {
+        throw NSError(domain: "CallSTT", code: 502, userInfo: [
+            NSLocalizedDescriptionKey: "麦克风输入暂不可用（音频会话未就绪或被占用），请重试"])
+    }
+    return format
+}
+
 // MARK: - 不依赖麦克风/权限的生命周期状态（两种实现共用）
 
 /// 启动前就占用代次；stop 既能结束收音，也能使尚在等待权限/模型下载的 start 失效。
@@ -100,6 +187,7 @@ protocol FallbackCapableSession: SpeechSession {
 @MainActor
 final class ModernSpeechSession: SpeechSession, FallbackCapableSession {
     var onEvent: (@MainActor (STTEvent) -> Void)?
+    var onInvalidated: (@MainActor (String) -> Void)?
 
     private var transcriber: SpeechTranscriber?
     private var analyzer: SpeechAnalyzer?
@@ -111,9 +199,21 @@ final class ModernSpeechSession: SpeechSession, FallbackCapableSession {
     /// 已经以 final 事件发出去的累计字符数（新 API 的结果是全文累计，
     /// 需要在这里按句切分出"一句说完"事件，VM 才能按句回复）
     private var emittedCharCount = 0
+    /// 本代次是否期望收音：VM 主动 stop / 打断收尾后置 false，
+    /// 用于忽略迟到事件、阻止重启任务把已挂断的通话复活。
+    private var wantsCapture = false
+    private let policy = AudioEnvironmentPolicy()
+    /// 惰性创建：闭包要捕获 self，只能在初始化完成后构建；
+    /// start() 里首次访问时才订阅系统通知。
+    private lazy var environmentWatcher = AudioEnvironmentWatcher(
+        onInterruptionBegan: { [weak self] in self?.handleEnvironmentEvent(.interruptionBegan) },
+        onRouteChanged: { [weak self] in self?.handleEnvironmentEvent(.routeChanged) },
+        onMediaServicesInvalidated: { [weak self] in self?.handleEnvironmentEvent(.mediaServicesInvalidated) })
 
     func start() async throws {
         try Task.checkCancellation()
+        _ = environmentWatcher   // 进入会话即订阅环境通知（惰性属性的首次实例化）
+        wantsCapture = true
         guard let sessionID = lifecycle.beginStart() else { return }
 
         do {
@@ -164,7 +264,9 @@ final class ModernSpeechSession: SpeechSession, FallbackCapableSession {
                     do {
                         try await analyzer.start(inputSequence: stream)
                     } catch {
-                        self?.finishSession(ifCurrent: sessionID)
+                        // analyzer 起不来：结束本代次；若通话仍在进行（非 VM 取消），
+                        // 通知 VM 结束通话，避免「界面还在听、麦克风已死」的僵尸态。
+                        self?.finishSession(ifCurrent: sessionID, notifyIfOrphaned: true)
                     }
                 }
                 let terminators: Set<Character> = ["。", "！", "？", "…", "!", "?", ";", "\n"]
@@ -187,7 +289,7 @@ final class ModernSpeechSession: SpeechSession, FallbackCapableSession {
                     } catch {
                         // 取消和结果流失败都结束本代次，不保留已失去消费者的麦克风。
                     }
-                    self?.finishSession(ifCurrent: sessionID)
+                    self?.finishSession(ifCurrent: sessionID, notifyIfOrphaned: true)
                 }
             } onCancel: { [weak self] in
                 Task { @MainActor [weak self] in self?.finishSession(ifCurrent: sessionID) }
@@ -204,10 +306,14 @@ final class ModernSpeechSession: SpeechSession, FallbackCapableSession {
     }
 
     func stop() async {
+        wantsCapture = false
         finishSession()
     }
 
-    private func finishSession(ifCurrent sessionID: UUID? = nil) {
+    /// - notifyIfOrphaned: 结束后若通话仍期望收音（wantsCapture == true），
+    ///   说明这是一次「内部失败导致的静默断麦」，通知 VM 以明确文案结束通话。
+    ///   VM 主动 stop 路径会先把 wantsCapture 置 false，不会重复提示。
+    private func finishSession(ifCurrent sessionID: UUID? = nil, notifyIfOrphaned: Bool = false) {
         guard lifecycle.invalidate(ifCurrent: sessionID) else { return }
         feedContinuation?.finish()
         feedContinuation = nil
@@ -223,6 +329,40 @@ final class ModernSpeechSession: SpeechSession, FallbackCapableSession {
         analyzer = nil
         transcriber = nil
         emittedCharCount = 0
+        if notifyIfOrphaned, wantsCapture {
+            onInvalidated?("语音识别已中断，请重新开始通话")
+        }
+    }
+
+    // MARK: 环境事件（打断 / 路由切换 / 媒体服务失效）
+
+    private func handleEnvironmentEvent(_ event: AudioEnvironmentPolicy.Event) {
+        switch policy.action(for: event, captureWanted: wantsCapture, isRunning: lifecycle.isRunning) {
+        case .ignore:
+            return
+        case .endAndNotify(let note):
+            wantsCapture = false
+            finishSession()
+            onInvalidated?(note)
+        case .restart:
+            restartCapture()
+        }
+    }
+
+    /// 路由切换（耳机/蓝牙插拔）：先干净结束本代次（停 tap/engine），再重新走
+    /// start 流程跟随新路由。重启期间用户挂断（wantsCapture=false）则直接放弃；
+    /// 打断等其他环境事件抢先结束通话时不再重复提示。
+    private func restartCapture() {
+        finishSession()
+        Task { @MainActor [weak self] in
+            guard let self, self.wantsCapture else { return }
+            do {
+                try await self.start()
+            } catch {
+                guard self.wantsCapture else { return }
+                self.onInvalidated?("音频设备切换后收音未能恢复，请重新开始通话")
+            }
+        }
     }
 
     // engine 由本类自持（CallViewModel 不感知新/旧 API 差异）
@@ -235,8 +375,9 @@ final class ModernSpeechSession: SpeechSession, FallbackCapableSession {
         let input = audioEngine.inputNode
         // voice processing = 系统级回声消除，TTS 外放不会被当作用户说话
         try? input.setVoiceProcessingEnabled(true)
-        input.installTap(onBus: 0, bufferSize: 2048,
-                         format: input.outputFormat(forBus: 0)) { buffer, _ in
+        // installTap 对非法输入格式是 ObjC 硬 trap；先校验，失败走可捕获错误路径
+        let tapFormat = try validatedMicFormat(of: input)
+        input.installTap(onBus: 0, bufferSize: 2048, format: tapFormat) { buffer, _ in
             // 固定绑定本次流；stop 后迟到的 tap 只能 yield 到已结束的旧流。
             continuation.yield(AnalyzerInput(buffer: buffer))
         }
@@ -270,6 +411,7 @@ private final class LegacySpeechAudioSink: @unchecked Sendable {
 @MainActor
 final class LegacySpeechSession: NSObject, SpeechSession {
     var onEvent: (@MainActor (STTEvent) -> Void)?
+    var onInvalidated: (@MainActor (String) -> Void)?
 
     private let audioEngine = AVAudioEngine()
     private var recognizer: SFSpeechRecognizer?
@@ -280,6 +422,14 @@ final class LegacySpeechSession: NSObject, SpeechSession {
     private var restartTask: Task<Void, Never>?
     private var audioSink: LegacySpeechAudioSink?
     private var tapInstalled = false
+    /// 本代次是否期望收音（语义与 Modern 会话一致）
+    private var wantsCapture = false
+    private let policy = AudioEnvironmentPolicy()
+    /// 惰性创建（原因同 Modern 会话）；start() 里首次访问时才订阅系统通知
+    private lazy var environmentWatcher = AudioEnvironmentWatcher(
+        onInterruptionBegan: { [weak self] in self?.handleEnvironmentEvent(.interruptionBegan) },
+        onRouteChanged: { [weak self] in self?.handleEnvironmentEvent(.routeChanged) },
+        onMediaServicesInvalidated: { [weak self] in self?.handleEnvironmentEvent(.mediaServicesInvalidated) })
 
     override init() {
         super.init()
@@ -288,6 +438,8 @@ final class LegacySpeechSession: NSObject, SpeechSession {
 
     func start() async throws {
         try Task.checkCancellation()
+        _ = environmentWatcher   // 进入会话即订阅环境通知
+        wantsCapture = true
         guard let sessionID = lifecycle.beginStart() else { return }
         do {
             try await withTaskCancellationHandler {
@@ -310,8 +462,9 @@ final class LegacySpeechSession: NSObject, SpeechSession {
                 audioSink = sink
                 let input = audioEngine.inputNode
                 try? input.setVoiceProcessingEnabled(true)   // 回声消除
-                input.installTap(onBus: 0, bufferSize: 2048,
-                                 format: input.outputFormat(forBus: 0)) { buffer, _ in
+                // installTap 对非法输入格式是 ObjC 硬 trap；先校验再安装
+                let tapFormat = try validatedMicFormat(of: input)
+                input.installTap(onBus: 0, bufferSize: 2048, format: tapFormat) { buffer, _ in
                     sink.append(buffer)
                 }
                 tapInstalled = true
@@ -352,6 +505,8 @@ final class LegacySpeechSession: NSObject, SpeechSession {
                               sessionID: sessionID, roundID: roundID)
             }
         }
+        restartTask?.cancel()   // 迟到的旧重启任务不能再占住这个槽位
+        restartTask = nil
     }
 
     private func receive(text: String?, isFinal: Bool, failed: Bool,
@@ -372,18 +527,22 @@ final class LegacySpeechSession: NSObject, SpeechSession {
                 do {
                     try self.startRecognitionRound(sessionID: sessionID)
                 } catch {
-                    self.finishSession(ifCurrent: sessionID)
+                    // 换句时识别已不可用（断网等）：结束收音并告知 VM，
+                    // 避免「界面在听、永远等不到下一句」的僵尸通话。
+                    self.finishSession(ifCurrent: sessionID, notifyIfOrphaned: true)
                 }
             }
         } else if failed {
-            // 错误不能无限自动重试；结束资源，外部可显式 start 再试。
-            finishSession(ifCurrent: sessionID)
+            // 错误不能无限自动重试；结束资源并让 VM 以明确文案结束通话
+            // （此前是静默结束，界面仍显示「在听」，实际麦克风已死）。
+            finishSession(ifCurrent: sessionID, notifyIfOrphaned: true)
         } else if let event {
             onEvent?(event)
         }
     }
 
     func stop() async {
+        wantsCapture = false
         finishSession()
     }
 
@@ -396,7 +555,8 @@ final class LegacySpeechSession: NSObject, SpeechSession {
         task = nil
     }
 
-    private func finishSession(ifCurrent sessionID: UUID? = nil) {
+    /// - notifyIfOrphaned: 语义与 Modern 会话一致——内部失败导致的断麦要告知 VM。
+    private func finishSession(ifCurrent sessionID: UUID? = nil, notifyIfOrphaned: Bool = false) {
         guard lifecycle.invalidate(ifCurrent: sessionID) else { return }
         recognitionState.invalidate()
         restartTask?.cancel()
@@ -407,6 +567,39 @@ final class LegacySpeechSession: NSObject, SpeechSession {
         if tapInstalled {
             audioEngine.inputNode.removeTap(onBus: 0)
             tapInstalled = false
+        }
+        if notifyIfOrphaned, wantsCapture {
+            onInvalidated?("语音识别已中断，请重新开始通话")
+        }
+    }
+
+    // MARK: 环境事件（打断 / 路由切换 / 媒体服务失效）
+
+    private func handleEnvironmentEvent(_ event: AudioEnvironmentPolicy.Event) {
+        switch policy.action(for: event, captureWanted: wantsCapture, isRunning: lifecycle.isRunning) {
+        case .ignore:
+            return
+        case .endAndNotify(let note):
+            wantsCapture = false
+            finishSession()
+            onInvalidated?(note)
+        case .restart:
+            restartCapture()
+        }
+    }
+
+    /// 路由切换：干净结束后重新 start（已授权，不会再弹框；engine/tap 全部重建）。
+    /// 期间用户挂断或其他事件抢先结束通话时不再重复提示。
+    private func restartCapture() {
+        finishSession()
+        Task { @MainActor [weak self] in
+            guard let self, self.wantsCapture else { return }
+            do {
+                try await self.start()
+            } catch {
+                guard self.wantsCapture else { return }
+                self.onInvalidated?("音频设备切换后收音未能恢复，请重新开始通话")
+            }
         }
     }
 }

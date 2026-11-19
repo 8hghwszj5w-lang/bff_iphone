@@ -43,8 +43,21 @@ struct TTSAudioChunk: Sendable {
 protocol SpeechSession: AnyObject {
     /// partial：实时临时字幕；final：一句说完。speaking 期间的 partial 用于打断检测
     var onEvent: (@MainActor (STTEvent) -> Void)? { get set }
+    /// 环境事件回调：来电打断、耳机插拔后自动重启失败、识别内部失败导致收音
+    /// 结束时触发，参数是可直接展示给用户的说明。VM 主动 stop() 不触发。
+    /// （不触发就会产生「界面显示通话中、麦克风已死」的僵尸通话）
+    var onInvalidated: (@MainActor (String) -> Void)? { get set }
     func start() async throws
     func stop() async
+}
+
+extension SpeechSession {
+    /// 默认空实现：单元测试的 Mock 不关心环境事件。
+    /// 生产实现（Modern/Legacy）用存储属性覆盖。
+    var onInvalidated: (@MainActor (String) -> Void)? {
+        get { nil }
+        set {}
+    }
 }
 
 enum STTEvent {

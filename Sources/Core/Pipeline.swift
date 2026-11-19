@@ -16,17 +16,27 @@ final class Pipeline: ObservableObject {
     private let tools: [AgentTool]
     /// 常驻工具（如日程记事）：不受「允许联网搜索」开关影响，永远声明给模型
     private let alwaysTools: [AgentTool]
+    /// 生图工具（image_generate / image_library）：受生图工作室开关控制
+    private let studioTools: [AgentTool]
     private let settings: SettingsStore
     private let usage: UsageStore
     /// 每日日程：每轮把"她此刻的生活背景"注入 system 消息
     private let schedule: ScheduleStore?
+    /// 生图工作室：每轮把「生图说明 + 参考库目录」注入 system 消息；关闭时不声明工具
+    private let studio: ImageStudioStore?
+    /// 主动消息引擎：回合首尾通知它（对话期间压住心跳/闹铃；用户开口即视为闭环提前完成）
+    private weak var proactive: ProactiveEngine?
 
     init(client: DeepSeekClient, memory: MemoryStore, persona: PersonaStore,
          tools: [AgentTool], settings: SettingsStore, usage: UsageStore,
-         alwaysTools: [AgentTool] = [], schedule: ScheduleStore? = nil) {
+         alwaysTools: [AgentTool] = [], schedule: ScheduleStore? = nil,
+         studio: ImageStudioStore? = nil, studioTools: [AgentTool] = [],
+         proactive: ProactiveEngine? = nil) {
         self.client = client; self.memory = memory; self.persona = persona
-        self.tools = tools; self.alwaysTools = alwaysTools
+        self.tools = tools; self.alwaysTools = alwaysTools; self.studioTools = studioTools
         self.settings = settings; self.usage = usage; self.schedule = schedule
+        self.studio = studio
+        self.proactive = proactive
     }
 
     /// 处理一条用户消息，流式返回回复文本。返回最终完整回复。
@@ -50,10 +60,20 @@ final class Pipeline: ObservableObject {
                 images: [Data] = [],
                 files: [UserFileAttachment] = [],
                 onDelta: @escaping (String) -> Void) async throws -> String {
+        // 回合首尾通知主动消息引擎：期间压住心跳/闹铃，用户开口同时取消挂起闹铃
+        // （defer 保证抛错路径也能结束回合，让被压着的到点闹铃立刻补跑）
+        await proactive?.beginUserTurn()
+        defer { proactive?.endUserTurn() }
         try Task.checkCancellation()
-        // 常驻工具（日程记事）始终声明；搜索工具受「允许联网搜索」开关控制
-        let allToolPool = tools + alwaysTools
-        let defs = (settings.autoSearch ? tools.map(\.definition) : []) + alwaysTools.map(\.definition)
+        // 记下本轮开始时的生成计数：结束后从 studio 取这一轮新画的图
+        let generationEpochBefore = studio?.generationEpoch ?? 0
+        // 常驻工具（日程记事）始终声明；搜索工具受「允许联网搜索」开关控制；
+        // 生图工具受生图工作室开关控制（关掉时连工具都不声明，模型不会白调）。
+        let studioActive = studio?.config.enabled == true
+        let allToolPool = tools + alwaysTools + (studioActive ? studioTools : [])
+        let defs = (settings.autoSearch ? tools.map(\.definition) : [])
+            + alwaysTools.map(\.definition)
+            + (studioActive ? studioTools.map(\.definition) : [])
 
         // 图像理解仅 deepseek-flash 支持；提前给出明确指引而不是让 API 报错
         if !images.isEmpty, settings.model.lowercased().contains("v4-pro") {
@@ -113,9 +133,12 @@ final class Pipeline: ObservableObject {
         }
 
         memory.append(role: "user", content: memoryText, maxHistory: settings.maxHistory)
-        // contextMessages 组出 system（人设 + 日程背景 + 记忆摘要）+ 历史窗口；都是纯文本
+        // contextMessages 组出 system（人设 + 日程背景 + 生图说明 + 记忆摘要）+ 历史窗口；都是纯文本
         let scheduleBlock = schedule?.injectionText(now: Date()) ?? ""
-        var context = memory.contextMessages(persona: persona.text, scheduleBlock: scheduleBlock)
+        let studioBlock = studioActive ? (studio?.guideText() ?? "") : ""
+        var context = memory.contextMessages(persona: persona.text,
+                                             scheduleBlock: scheduleBlock,
+                                             studioBlock: studioBlock)
         // 直传块只作用于本轮请求：最近一条用户消息替换为带块的版本。
         // （历史消息保持纯文本——base64 太大，file_id 已过期会报错）
         if !parts.isEmpty, let idx = context.lastIndex(where: { $0.role == "user" }) {
@@ -137,7 +160,21 @@ final class Pipeline: ObservableObject {
 
         // 清洗：去掉模型偶尔冒出的多余前后缀
         let cleaned = clean(reply)
-        memory.append(role: "assistant", content: cleaned, maxHistory: settings.maxHistory)
+        // 本轮她若调了 image_generate，把图记进这条 assistant 记忆：
+        //   · entry.images 存 outputs/ 相对路径（重启后气泡还能显示）
+        //   · 正文追加一句轻量标记，下一轮她还知道自己刚画过什么
+        let generated = studio?.recordsSince(generationEpochBefore) ?? []
+        let generatedImages = generated.filter(\.isDone).compactMap { $0.files.first }
+        var memoryContent = cleaned
+        if !generated.isEmpty {
+            let marker = generated.map { record in
+                record.isDone ? "［她刚画了一张图 \(record.id)，已经展示给用户］"
+                              : "［她试着画一张图（\(record.id)），没画成］"
+            }.joined(separator: "\n")
+            memoryContent = (cleaned + "\n" + marker).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        memory.append(role: "assistant", content: memoryContent, maxHistory: settings.maxHistory,
+                      images: generatedImages.isEmpty ? nil : generatedImages)
         return cleaned
     }
 

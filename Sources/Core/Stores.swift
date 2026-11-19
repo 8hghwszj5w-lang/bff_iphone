@@ -103,6 +103,9 @@ struct MemoryRecord: Codable {
         var role: String
         var content: String
         var time: Date
+        /// 她本轮生成的图片（相对 image-studio/outputs/ 的路径）。
+        /// 只存路径不存图片数据；重启后气泡仍能从沙盒读出来显示。
+        var images: [String]? = nil
     }
     var contact = "default"
     var summary = ""                 // 滚动摘要（老对话压缩后的长期记忆）
@@ -144,10 +147,10 @@ final class MemoryStore: ObservableObject {
         }
     }
 
-    func append(role: String, content: String, maxHistory: Int) {
+    func append(role: String, content: String, maxHistory: Int, images: [String]? = nil) {
         // 防止损坏/旧版本设置使 prefix/removeFirst 收到负数，且至少保留当前消息。
         let maxHistory = max(2, maxHistory)
-        record.entries.append(.init(role: role, content: content, time: Date()))
+        record.entries.append(.init(role: role, content: content, time: Date(), images: images))
         // 逐字窗口超限：把最老的一半压成摘要（滚动摘要）。
         // 注意：这里的"压缩"只是把老对话原文逐行拼进 summary，没有用模型总结——
         // 想要更聪明的摘要（让模型把老对话浓缩成几句话），在这里发一次后台
@@ -163,14 +166,17 @@ final class MemoryStore: ObservableObject {
         save()
     }
 
-    /// 组装发给模型的上下文：system(人设 + 日程背景 + 摘要) + 窗口
-    /// 模型看到的完整结构 = [人设+日程+摘要(system)] + [窗口内逐条对话]
+    /// 组装发给模型的上下文：system(人设 + 日程背景 + 生图说明 + 摘要) + 窗口
+    /// 模型看到的完整结构 = [人设+日程+生图+摘要(system)] + [窗口内逐条对话]
     /// Pipeline.handle 会在拿到这个数组后，把最后一条 user 替换成带图片/文件块的版本
     /// - scheduleBlock: "她此刻的生活背景"注入块（ScheduleStore.injectionText 生成），
     ///   插在人设之后、记忆摘要之前——离对话越近的指令权重越高，摘要排最后
-    func contextMessages(persona: String, scheduleBlock: String = "") -> [ChatMessage] {
+    /// - studioBlock: 生图说明 + 参考库目录（ImageStudioStore.guideText 生成），
+    ///   告诉模型什么时候、怎么调用 image_generate
+    func contextMessages(persona: String, scheduleBlock: String = "", studioBlock: String = "") -> [ChatMessage] {
         var sys = persona
         if !scheduleBlock.isEmpty { sys += "\n\n" + scheduleBlock }
+        if !studioBlock.isEmpty { sys += "\n\n" + studioBlock }
         if !record.summary.isEmpty {
             sys += "\n\n【长期记忆（更早对话的摘要）】\n" + record.summary
         }

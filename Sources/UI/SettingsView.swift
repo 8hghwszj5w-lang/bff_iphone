@@ -86,6 +86,35 @@ struct SettingsView: View {
                                 .monospacedDigit()
                         }
                     }
+                    NavigationLink {
+                        ImageStudioSettingsView()
+                    } label: {
+                        HStack {
+                            Label("生图工作室", systemImage: "paintbrush")
+                            Spacer()
+                            Text(app.studio.config.enabled
+                                 ? (app.studio.config.api.baseURL.isEmpty ? "未配置接口" : app.studio.config.api.model)
+                                 : "已关闭")
+                                .font(.footnote)
+                                .foregroundStyle(app.studio.config.enabled ? .secondary : Color(.tertiaryLabel))
+                                .lineLimit(1)
+                        }
+                    }
+                    NavigationLink {
+                        ProactiveSettingsView()
+                    } label: {
+                        HStack {
+                            Label("主动消息", systemImage: "antenna.radiowaves.left.and.right")
+                            Spacer()
+                            Text(app.proactiveStore.config.enabled
+                                 ? "心跳 \(Int(app.proactiveStore.config.heartbeatBaseProbability * 100))% · \(app.proactiveStore.config.heartbeatIntervalMinutes) 分钟"
+                                    + (app.proactiveStore.state.followups.isEmpty ? "" : " · \(app.proactiveStore.state.followups.count) 条闹铃")
+                                 : "已关闭")
+                                .font(.footnote)
+                                .foregroundStyle(app.proactiveStore.config.enabled ? .secondary : Color(.tertiaryLabel))
+                                .lineLimit(1)
+                        }
+                    }
                 }
                 Section {
                     NavigationLink {

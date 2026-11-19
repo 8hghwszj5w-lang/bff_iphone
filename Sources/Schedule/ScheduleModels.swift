@@ -14,6 +14,10 @@ struct ScheduleItem: Codable, Equatable {
     var activity: String
     var location: String?
     var detail: String?
+    /// 这一段穿什么（服饰库名字，可不在库里）——生图时沿用（对应桌面端 daily-schedule 的 outfit 字段）
+    var outfit: String?
+    /// 穿搭细节补充（如「外面套了件米色开衫」）——写进生图提示词
+    var outfitNote: String?
 
     var startMinute: Int { Self.minutes(of: start) ?? 0 }
     var endMinute: Int { Self.minutes(of: end) ?? 1440 }

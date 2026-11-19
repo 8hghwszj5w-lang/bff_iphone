@@ -70,6 +70,10 @@ struct ScheduleAdjustTool: AgentTool {
                                        "description": .string("一两句当时的状态或小插曲。")]),
                     "reason": .object(["type": .string("string"),
                                        "description": .string("为什么改主意（例如「朋友约我吃火锅」）。")]),
+                    "outfit": .object(["type": .string("string"),
+                                       "description": .string("这段穿什么（一件衣服的名字）。换了衣服时填。")]),
+                    "outfitNote": .object(["type": .string("string"),
+                                           "description": .string("穿搭细节补充（如「外面套了件米色开衫」），没换就不填。")]),
                 ]),
                 "required": .array([.string("start"), .string("end"),
                                     .string("activity"), .string("reason")]),
@@ -88,6 +92,8 @@ struct ScheduleAdjustTool: AgentTool {
         let reason = args["reason"] as? String ?? "临时改主意"
         let location = args["location"] as? String
         let detail = args["detail"] as? String
+        let outfit = args["outfit"] as? String
+        let outfitNote = args["outfitNote"] as? String
 
         guard start.contains(":"), end.contains(":"), !activity.isEmpty else {
             return "{\"error\": \"start/end/activity 必填（时间格式 HH:MM）\"}"
@@ -98,7 +104,8 @@ struct ScheduleAdjustTool: AgentTool {
         await MainActor.run {
             store.adjust(dateKey: dateKey, start: start, end: end,
                          activity: activity, note: reason,
-                         location: location?.isEmpty == true ? nil : location)
+                         location: location?.isEmpty == true ? nil : location,
+                         outfit: outfit, outfitNote: outfitNote)
         }
         // 返回给模型的确认话术（提醒它用"自己的口吻"回用户）
         var note = "记下了：\(start)–\(end) \(activity)"

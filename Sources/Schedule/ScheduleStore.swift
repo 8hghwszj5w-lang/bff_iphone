@@ -75,7 +75,7 @@ final class ScheduleStore: ObservableObject {
     ///   - note: 改主意的原因（比如「朋友约我吃火锅」），写进 changes
     func adjust(dateKey: String, start: String, end: String,
                 activity: String, note: String,
-                location: String?) {
+                location: String?, outfit: String? = nil, outfitNote: String? = nil) {
         var day = loadDay(dateKey: dateKey) ?? DaySchedule(date: dateKey)
         let s = ScheduleItem.minutes(of: start) ?? 0
         let e = min(1440, ScheduleItem.minutes(of: end) ?? 1440)
@@ -102,7 +102,9 @@ final class ScheduleStore: ObservableObject {
 
         // 2. 插入新段 + 归一化补空档
         kept.append(ScheduleItem(start: start, end: end, activity: activity,
-                                 location: location, detail: nil))
+                                 location: location, detail: nil,
+                                 outfit: outfit?.isEmpty == true ? nil : outfit,
+                                 outfitNote: outfitNote?.isEmpty == true ? nil : outfitNote))
         day.items = ScheduleNormalizer.normalize(kept)
 
         // 3. 临时改动记录（dayText 里会展示最近几次）

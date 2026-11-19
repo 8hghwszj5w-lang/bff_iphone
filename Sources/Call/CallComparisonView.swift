@@ -367,8 +367,20 @@ struct CallComparisonView: View {
     /// 不会把播放吞掉；已激活时重复调用无害。失败不阻塞（try?），只影响能否出声。
     private func activatePlaybackSession() {
         let session = AVAudioSession.sharedInstance()
+        // ⚠️ 闪退修复：通话进行中绝不能改会话类别。通话页的识别引擎正带着
+        // 麦克风 tap + voice processing 跑在 playAndRecord 上，这里改类别会让
+        // 它的音频对象集体失效，真机上就是「通话中点开对比页就闪退/掉麦」。
+        guard !PlaybackSessionConfig.shouldPreserveCallCategory(current: session.category) else { return }
         try? session.setCategory(.playback, mode: .spokenAudio)
         try? session.setActive(true)
+    }
+}
+
+/// 对比页是否允许切换音频会话类别（纯逻辑，离线可测）。
+enum PlaybackSessionConfig {
+    /// 正在通话（playAndRecord）时保持现有会话，不得改类别。
+    static func shouldPreserveCallCategory(current: AVAudioSession.Category) -> Bool {
+        current == .playAndRecord
     }
 }
 

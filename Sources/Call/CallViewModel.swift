@@ -67,7 +67,16 @@ final class CallViewModel {
         self.speechSession = speechSession
         self.route = route
         self.recordMetrics = recordMetrics ?? { CallMetricsStore.shared.record($0) }
-        speechSession.onEvent = { [weak self] event in self?.handleSpeechEvent(event) }
+        bindSession(speechSession)
+    }
+
+    /// 每次替换 speechSession（init / iOS 26 回退旧方案）都要重新绑定：
+    /// · onEvent   → 识别结果驱动状态机
+    /// · onInvalidated → 来电打断 / 耳机插拔恢复失败 / 识别内部中断等环境事件
+    ///   导致收音结束时，以明确文案结束通话，杜绝「界面通话中、麦克风已死」的僵尸态
+    private func bindSession(_ session: SpeechSession) {
+        session.onEvent = { [weak self] event in self?.handleSpeechEvent(event) }
+        session.onInvalidated = { [weak self] note in self?.failCall(note) }
     }
 
     static func make(pipeline: Pipeline, settings: SettingsStore) -> CallViewModel {
@@ -128,7 +137,7 @@ final class CallViewModel {
                 let fallbackCapable = (speechSession as? FallbackCapableSession)?.fallbackOnStartFailure == true
                 guard fallbackCapable else { throw error }
                 speechSession = LegacySpeechSession()
-                speechSession.onEvent = { [weak self] event in self?.handleSpeechEvent(event) }
+                bindSession(speechSession)
                 degradationNote = "iOS 26 语音转写不可用，已切换系统经典识别方案"
                 try await speechSession.start()
             }

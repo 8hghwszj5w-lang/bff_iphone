@@ -43,7 +43,11 @@ final class AppState: ObservableObject {
     var pipeline: Pipeline
     var usage: UsageStore
     var schedule: ScheduleStore
+    var studio: ImageStudioStore
     var chatBackground = ChatBackgroundStore()
+    /// 主动消息插件（心跳 + 闹铃）：Store 管配置/挂起闹铃，Engine 管定时器/生成/通知
+    var proactiveStore: ProactiveStore
+    var proactive: ProactiveEngine
     // 持有 Combine 订阅，否则 sink 会被立即释放、UI 不再刷新
     private var storeSubscriptions = Set<AnyCancellable>()
 
@@ -58,27 +62,60 @@ final class AppState: ObservableObject {
         // 每日日程（对应桌面端 dsh-daily-schedule）：一天一个 JSON，持久化在 Documents/schedule/
         let schedule = ScheduleStore(directory: docs.appendingPathComponent("schedule", isDirectory: true))
         self.schedule = schedule
+        // 生图工作室（对应桌面端 dsh-image-studio）：参考库 / 关键词 / 生成记录都在 Documents/image-studio/
+        let studio = ImageStudioStore(directory: docs.appendingPathComponent("image-studio", isDirectory: true),
+                                      schedule: schedule)
+        self.studio = studio
+        // 主动消息插件：配置在 UserDefaults，挂起闹铃在 Documents/proactive/state.json
+        let proactiveStore = ProactiveStore()
+        self.proactiveStore = proactiveStore
         let search = WebSearchTool()
         let client = DeepSeekClient(settings: settings)
+        // 主动消息引擎复用同一个 DeepSeekClient；ask 闭包返回 token 数给用量统计
+        let proactive = ProactiveEngine(store: proactiveStore,
+                                        settings: settings,
+                                        persona: persona,
+                                        memory: memory,
+                                        schedule: schedule,
+                                        usage: usage,
+                                        characterName: schedule.characterName,
+                                        ask: { messages in
+                                            let (text, used) = try await client.ask(messages: messages,
+                                                                                    tools: [],
+                                                                                    toolRunner: { _, _ in "" })
+                                            return (text, used.promptTokens, used.completionTokens)
+                                        })
+        self.proactive = proactive
         // tools 里的受「允许联网搜索」开关控制；alwaysTools 是常驻工具（日程记事 +
-        // 本机日历/提醒/备忘录）。想加新工具：在这里往 tools（受开关）或 alwaysTools（常驻）里加
+        // 本机日历/提醒/备忘录 + 主动消息 followup）；studioTools 受生图工作室开关控制。
+        // 想加新工具：往对应数组里加
         self.pipeline = Pipeline(client: client, memory: memory,
                                  persona: persona, tools: [search],
                                  settings: settings, usage: usage,
                                  alwaysTools: [ScheduleAdjustTool(store: schedule),
                                                ScheduleViewTool(store: schedule),
+                                               FollowupSetTool(store: proactiveStore),
+                                               FollowupCancelTool(store: proactiveStore),
                                                CalendarReadTool(), CalendarCreateTool(),
                                                RemindersReadTool(), RemindersCreateTool(),
                                                NotesSearchTool()],
-                                 schedule: schedule)
+                                 schedule: schedule,
+                                 studio: studio,
+                                 studioTools: [ImageGenerateTool(store: studio),
+                                               ImageLibraryTool(store: studio)],
+                                 proactive: proactive)
         // EnvironmentObject 不会自动观察嵌套 ObservableObject。
         // 只转发 store 变更；流式文本仍局限在 ChatView 的本地状态。
         for publisher in [settings.objectWillChange, memory.objectWillChange,
                           persona.objectWillChange, usage.objectWillChange,
-                          schedule.objectWillChange, chatBackground.objectWillChange] {
+                          schedule.objectWillChange, studio.objectWillChange,
+                          proactiveStore.objectWillChange, proactive.objectWillChange,
+                          chatBackground.objectWillChange] {
             publisher.sink { [weak self] _ in self?.objectWillChange.send() }
                 .store(in: &storeSubscriptions)
         }
+        // 启动定时器 / 注册通知 category 与 BGAppRefresh（必须在启动期完成注册）
+        proactive.applicationStarted()
     }
 
     /// 自动日程生成（对应桌面端 runner.js）：今天没日程立刻补；到 22:00 后补明天；

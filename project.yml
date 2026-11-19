@@ -31,12 +31,20 @@ targets:
           - weixinulapi
           - alipay
           - alipays
+        # 主动消息插件：BGAppRefresh 机会性补跑到点的闹铃（系统不保证何时给时间）
+        UIBackgroundModes:
+          - fetch
+        BGTaskSchedulerPermittedIdentifiers:
+          - local.fenshen.proactive.refresh
     settings:
       base:
         SWIFT_VERSION: "5.9"
         TARGETED_DEVICE_FAMILY: "1"
         CODE_SIGN_STYLE: Automatic
         GENERATE_INFOPLIST_FILE: false
+        # 真机签名团队：此前只在 pbxproj 里手工改过，xcodegen 重新生成会丢掉；
+        # 落到 project.yml 作为唯一事实源，重新生成后仍保留。
+        DEVELOPMENT_TEAM: H77TRGAB7J
   FenShenTests:
     type: bundle.unit-test
     platform: iOS

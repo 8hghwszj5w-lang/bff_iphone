@@ -16,9 +16,11 @@ struct ChatMessageView: Identifiable, Equatable {
     var role: String       // user / assistant
     var text: String       // 气泡显示的文本（带附件时是摘要，不是喂给模型的全文）
     var isStreaming = false
+    /// 她生成的图片（相对 image-studio/outputs/ 的路径），显示在文字上方
+    var images: [String] = []
 
-    init(role: String, text: String, isStreaming: Bool = false, id: UUID = UUID()) {
-        self.id = id; self.role = role; self.text = text; self.isStreaming = isStreaming
+    init(role: String, text: String, isStreaming: Bool = false, id: UUID = UUID(), images: [String] = []) {
+        self.id = id; self.role = role; self.text = text; self.isStreaming = isStreaming; self.images = images
     }
 }
 
@@ -37,6 +39,9 @@ struct ChatView: View {
     @State private var pendingFile: (name: String, url: URL)?
     @State private var showAttachmentPanel = false   // 微信式「＋」面板展开态
     @State private var showCamera = false            // 拍摄（真机）
+    /// 她主动开口（心跳/闹铃）已上屏的 Arrival id，防 onReceive 重复补气泡
+    @State private var shownArrivalIDs: Set<UUID> = []
+    @Environment(\.scenePhase) private var scenePhase
     @FocusState private var inputFocused: Bool
 
     var body: some View {
@@ -78,11 +83,31 @@ struct ChatView: View {
             .onAppear {
                 if messages.isEmpty {
                     messages = app.memory.record.entries.map {
-                        ChatMessageView(role: $0.role, text: $0.content)
+                        // 她画过的图随记忆条目一起恢复（路径指向沙盒 outputs/）
+                        ChatMessageView(role: $0.role, text: $0.content, images: $0.images ?? [])
                     }
                 }
                 // 自动日程生成：今天没日程立刻补，22:00 后补明天（内部有冷却，幂等）
                 app.autoGenerateSchedule()
+                // 主动消息引擎：启动时也做一次「回前台」处理（catch-up 冻结期间到点的闹铃）
+                app.proactive.handleActive()
+            }
+            .onChange(of: scenePhase) { phase in
+                // 主动消息引擎的前后台衔接：回前台清预约通知 + catch-up；退后台预约敲门通知
+                switch phase {
+                case .active: app.proactive.handleActive()
+                case .background: app.proactive.handleBackground()
+                default: break
+                }
+            }
+            .onReceive(app.proactive.$lastArrival) { arrival in
+                // 她主动开口（心跳/闹铃生成完成）：实时补一条她的气泡。
+                // 历史恢复走上面 onAppear（主动消息已写进记忆），这里只管本轮实时到达。
+                guard let a = arrival, !shownArrivalIDs.contains(a.id) else { return }
+                shownArrivalIDs.insert(a.id)
+                withAnimation(.easeOut(duration: 0.2)) {
+                    messages.append(ChatMessageView(role: "assistant", text: a.text))
+                }
             }
             .alert("出错了", isPresented: .init(get: { error != nil }, set: { if !$0 { error = nil } })) {
                 Button("好", role: .cancel) {}
@@ -400,11 +425,12 @@ struct ChatView: View {
                 messages[idx].text += delta
             }
         }
-        func finishReply(_ finalText: String?) {
+        func finishReply(_ finalText: String?, images: [String] = []) {
             if let idx = messages.lastIndex(where: { $0.id == replyID }) {
                 var m = messages[idx]
                 m.isStreaming = false
                 if let finalText { m.text = finalText }
+                if !images.isEmpty { m.images = images }
                 if m.text.isEmpty { m.text = "（她没说话…可能是网络或 API 出了问题）" }
                 messages[idx] = m
             }
@@ -438,6 +464,9 @@ struct ChatView: View {
                     appendDelta(stream.drain())
                 }
             }
+            // 记下本轮开始时的生成计数：handle 里她若调了 image_generate，
+            // 结束后把新图贴到这条回复气泡上
+            let studioEpochBefore = app.studio.generationEpoch
             do {
                 let reply = try await app.pipeline.handle(userText: text,
                                                           images: imageData,
@@ -446,11 +475,13 @@ struct ChatView: View {
                 }
                 updates.cancel()
                 _ = stream.finish()
-                finishReply(reply)
+                let generated = app.studio.recordsSince(studioEpochBefore).filter(\.isDone)
+                finishReply(reply, images: generated.compactMap { $0.files.first })
             } catch {
                 updates.cancel()
                 appendDelta(stream.finish())
-                finishReply(nil)
+                let generated = app.studio.recordsSince(studioEpochBefore).filter(\.isDone)
+                finishReply(nil, images: generated.compactMap { $0.files.first })
                 self.error = error.localizedDescription
             }
             busy = false
@@ -505,20 +536,130 @@ final class ChatDeltaBuffer: @unchecked Sendable {
 private struct Bubble: View, Equatable {
     let message: ChatMessageView
     var isMine: Bool { message.role == "user" }
+    /// 她生成的图点开看大图；@State 不参与 Equatable（== 只比 message，流式刷新判断不受影响）
+    @State private var viewerPath: String?
+
+    static func == (lhs: Bubble, rhs: Bubble) -> Bool { lhs.message == rhs.message }
 
     var body: some View {
         HStack {
             if isMine { Spacer(minLength: 48) }
-            Text(message.text + (message.isStreaming && message.text.isEmpty ? "…" : ""))
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 13)
-                .padding(.vertical, 9)
-                .background(isMine ? Color.accentColor : Color(.secondarySystemGroupedBackground))
-                .foregroundStyle(isMine ? .white : .primary)
-                .textSelection(.enabled)
-                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(message.images, id: \.self) { path in
+                    StudioBubbleImage(relativePath: path)
+                        .onTapGesture { viewerPath = path }
+                }
+                Text(message.text + (message.isStreaming && message.text.isEmpty ? "…" : ""))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 13)
+                    .padding(.vertical, 9)
+                    .background(isMine ? Color.accentColor : Color(.secondarySystemGroupedBackground))
+                    .foregroundStyle(isMine ? .white : .primary)
+                    .textSelection(.enabled)
+                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            }
             if !isMine { Spacer(minLength: 48) }
         }
+        .fullScreenCover(isPresented: Binding(get: { viewerPath != nil },
+                                              set: { if !$0 { viewerPath = nil } })) {
+            if let path = viewerPath {
+                StudioFullScreenImageView(relativePath: path)
+            }
+        }
+    }
+}
+
+// MARK: - 她生成的图（聊天气泡 + 全屏查看）
+
+/// 气泡里的生成图：从沙盒 image-studio/outputs/ 读，降采样显示
+struct StudioBubbleImage: View {
+    let relativePath: String
+    @State private var image: UIImage?
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: 240, maxHeight: 320)
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
+                    )
+            } else {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(Color(.secondarySystemGroupedBackground))
+                    .frame(width: 240, height: 180)
+                    .overlay(ProgressView())
+            }
+        }
+        .task(id: relativePath) {
+            let path = relativePath
+            let loaded = await Task.detached(priority: .utility) {
+                StudioImageCache.shared.image(relativePath: path)
+            }.value
+            guard !Task.isCancelled else { return }
+            image = loaded
+        }
+    }
+}
+
+/// 全屏看图：点一下关闭
+struct StudioFullScreenImageView: View {
+    let relativePath: String
+    @Environment(\.dismiss) private var dismiss
+    @State private var image: UIImage?
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .ignoresSafeArea()
+            } else {
+                ProgressView().tint(.white)
+            }
+        }
+        .onTapGesture { dismiss() }
+        .task {
+            let path = relativePath
+            let loaded = await Task.detached(priority: .utility) {
+                StudioImageCache.shared.image(relativePath: path, maxPixelSize: 4096)
+            }.value
+            guard !Task.isCancelled else { return }
+            image = loaded
+        }
+    }
+}
+
+/// 生成图解码缓存：气泡与全屏共用；NSCache 线程安全且可在内存紧张时回收
+final class StudioImageCache: @unchecked Sendable {
+    static let shared = StudioImageCache()
+    private let images = NSCache<NSString, UIImage>()
+
+    private init() {
+        images.countLimit = 24
+        images.totalCostLimit = 128 * 1024 * 1024
+    }
+
+    static func url(for relativePath: String) -> URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("image-studio/outputs/\(relativePath)")
+    }
+
+    func image(relativePath: String, maxPixelSize: Int = 1600) -> UIImage? {
+        let key = "\(maxPixelSize):\(relativePath)" as NSString
+        if let cached = images.object(forKey: key) { return cached }
+        guard let image = AttachmentExtractor.image(from: Self.url(for: relativePath), maxPixelSize: maxPixelSize) else {
+            return nil
+        }
+        let cost = (image.cgImage?.bytesPerRow ?? 0) * (image.cgImage?.height ?? 0)
+        images.setObject(image, forKey: key, cost: cost)
+        return image
     }
 }
 

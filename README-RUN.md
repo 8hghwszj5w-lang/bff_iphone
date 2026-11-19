@@ -91,6 +91,10 @@ LLM 流式文本按句末标点切句（`SentenceSplitter`，数字小数点如 
 | iOS 26 识别模型下载失败 | 换网络（建议 Wi-Fi）后重新进入通话页再试 |
 | 蓝牙耳机没声音 | 会话默认 `defaultToSpeaker` 外放；在控制中心把音频输出切到耳机，或断开重连蓝牙 |
 | 每句都提示「已切换本地语音」 | 云端连续失败进入 30 秒冷却；排查 Key/网络后**切一次路由**可立即重试云端 |
+| 提示「通话被来电或其他应用打断」 | 通话中来了电话/闹钟/Siri，音频被系统接管：处理完重新点「开始通话」即可（旧版本这里可能直接闪退） |
+| 提示「音频设备切换后收音未能恢复」 | 耳机/蓝牙插拔瞬间收音切换失败：重新开始通话；一般情况会自动跟随新路由无缝重启 |
+| 提示「语音识别已中断」 | 识别流内部失败（多为断网）：恢复网络后重新开始通话（旧版本这里会静默断麦，界面还在「听」却永远没反应） |
+| 通话中开对比模式会闪退/掉麦 | 已修复：通话进行中对比页不再改音频会话类别；若仍有问题请把崩溃日志（设置 → 隐私与安全性 → 分析与改进 → 分析数据里的 FenShen 条目）发出来 |
 
 ## 9. 文件结构（Sources/Call/）
 
@@ -100,7 +104,7 @@ LLM 流式文本按句末标点切句（`SentenceSplitter`，数字小数点如 
 | [CallViewModel.swift](Sources/Call/CallViewModel.swift) | 通话核心：一轮对话编排、双路径选择、开口打断、30 秒降级冷却、指标上报 |
 | [Protocols.swift](Sources/Call/Protocols.swift) | 五大组件协议抽象：LLMClient / 本地 TTS / 云端流式 TTS / 播放器 / 识别会话（可独立替换、单测用 Mock） |
 | [TTSEngines.swift](Sources/Call/TTSEngines.swift) | 路径 A：`AVSpeechSynthesizer` 本地合成；路径 B：DeepSeek TTS 流式客户端（含断流校验） |
-| [SpeechSessionImpls.swift](Sources/Call/SpeechSessionImpls.swift) | 语音识别：iOS 26+ 用 SpeechAnalyzer/SpeechTranscriber，低版本回退 SFSpeechRecognizer |
+| [SpeechSessionImpls.swift](Sources/Call/SpeechSessionImpls.swift) | 语音识别：iOS 26+ 用 SpeechAnalyzer/SpeechTranscriber，低版本回退 SFSpeechRecognizer；含环境事件策略 `AudioEnvironmentPolicy`、系统通知监听 `AudioEnvironmentWatcher` 与麦克风格式校验（通话中闪退加固） |
 | [StreamingAudioPlayer.swift](Sources/Call/StreamingAudioPlayer.swift) | 云端 PCM 分片顺序播放（actor）；`stopAll` 丢队列是打断的关键路径 |
 | [LLMClients.swift](Sources/Call/LLMClients.swift) | 把现有 Pipeline（人设 + 记忆 + 工具）适配成流式 `LLMClient`，通话与打字共用大脑 |
 | [KeychainStore.swift](Sources/Call/KeychainStore.swift) | API Key 的 Keychain 存取（读/写/删，service `local.fenshen`） |
