@@ -166,8 +166,13 @@ final class MemoryStore: ObservableObject {
         save()
     }
 
+    /// 最后一条消息的时间（时间戳前缀的间隔计算用）；空窗口返回 nil
+    var lastEntryTime: Date? {
+        record.entries.last?.time
+    }
+
     /// 组装发给模型的上下文：system(人设 + 日程背景 + 生图说明 + 摘要) + 窗口
-    /// 模型看到的完整结构 = [人设+日程+生图+摘要(system)] + [窗口内逐条对话]
+    /// 模型看到的完整结构 = [人设+日程+生图+摘要(system)] + [窗口内逐条对话（user 消息带时间戳前缀）]
     /// Pipeline.handle 会在拿到这个数组后，把最后一条 user 替换成带图片/文件块的版本
     /// - scheduleBlock: "她此刻的生活背景"注入块（ScheduleStore.injectionText 生成），
     ///   插在人设之后、记忆摘要之前——离对话越近的指令权重越高，摘要排最后

@@ -132,7 +132,16 @@ final class Pipeline: ObservableObject {
             memoryText += (memoryText.isEmpty ? "" : "\n") + "［附带文件：\(file.name)，经 Files API 直传］"
         }
 
-        memory.append(role: "user", content: memoryText, maxHistory: settings.maxHistory)
+        // 时间上下文（见 Sources/Core/TimeContext.swift）：时间戳前缀让模型感知
+        // 当前时间；间隔 ≥5 分钟附 gap 文案让它感知"时间流逝"。
+        // 该文本同时进记忆窗口 → 历史消息彼此都带戳，模型能看出轮与轮隔了多久。
+        let now = Date()
+        let stampedUserText = TimeContext.stampedUserMessage(
+            memoryText,
+            previousMessageTime: memory.lastEntryTime,
+            now: now)
+
+        memory.append(role: "user", content: stampedUserText, maxHistory: settings.maxHistory)
         // contextMessages 组出 system（人设 + 日程背景 + 生图说明 + 记忆摘要）+ 历史窗口；都是纯文本
         let scheduleBlock = schedule?.injectionText(now: Date()) ?? ""
         let studioBlock = studioActive ? (studio?.guideText() ?? "") : ""
