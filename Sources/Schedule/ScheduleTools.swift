@@ -98,14 +98,14 @@ struct ScheduleAdjustTool: AgentTool {
         guard start.contains(":"), end.contains(":"), !activity.isEmpty else {
             return "{\"error\": \"start/end/activity 必填（时间格式 HH:MM）\"}"
         }
-        guard let dateKey = await ScheduleStore.dayKey(for: dayName) else {
+        guard ["today", "tomorrow"].contains(dayName), let dateKey = await ScheduleStore.dayKey(for: dayName) else {
             return "{\"error\": \"day 只能是 today / tomorrow\"}"
         }
-        await MainActor.run {
-            store.adjust(dateKey: dateKey, start: start, end: end,
-                         activity: activity, note: reason,
-                         location: location?.isEmpty == true ? nil : location,
-                         outfit: outfit, outfitNote: outfitNote)
+        guard await store.adjust(dateKey: dateKey, start: start, end: end,
+                                 activity: activity, note: reason,
+                                 location: location?.isEmpty == true ? nil : location,
+                                 detail: detail, outfit: outfit, outfitNote: outfitNote) else {
+            return "{\"error\": \"时间范围无效：结束时间必须晚于开始时间，且不能超过 24:00\"}"
         }
         // 返回给模型的确认话术（提醒它用"自己的口吻"回用户）
         var note = "记下了：\(start)–\(end) \(activity)"

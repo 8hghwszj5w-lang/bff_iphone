@@ -29,9 +29,9 @@ struct ScheduleItem: Codable, Equatable {
     }
 
     static func minutes(of clock: String) -> Int? {
-        let parts = clock.split(separator: ":")
+        let parts = clock.split(separator: ":", omittingEmptySubsequences: false)
         guard parts.count == 2, let h = Int(parts[0]), let m = Int(parts[1]),
-              (0...24).contains(h), (0...59).contains(m) else { return nil }
+              (0...24).contains(h), (0...59).contains(m), h < 24 || m == 0 else { return nil }
         return h * 60 + m
     }
 

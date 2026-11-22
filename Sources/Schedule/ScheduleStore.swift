@@ -35,20 +35,25 @@ final class ScheduleStore: ObservableObject {
 
     // MARK: 日期工具
 
+    // 主线程隔离，每种格式只保留一个实例；切换时区时再更新配置。
+    private static let keyFormatter = formatter("yyyy-MM-dd", locale: "en_US_POSIX")
+    private static let labelFormatter = formatter("M月d日 星期E", locale: "zh_CN")
+
+    private static func formatter(_ format: String, locale: String) -> DateFormatter {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: locale)
+        formatter.dateFormat = format
+        return formatter
+    }
+
     static func dateKey(for date: Date, timeZone: TimeZone = .current) -> String {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd"
-        f.timeZone = timeZone
-        f.locale = Locale(identifier: "en_US_POSIX")
-        return f.string(from: date)
+        if keyFormatter.timeZone != timeZone { keyFormatter.timeZone = timeZone }
+        return keyFormatter.string(from: date)
     }
 
     static func dateLabel(for date: Date, timeZone: TimeZone = .current) -> String {
-        let f = DateFormatter()
-        f.dateFormat = "M月d日 星期E"
-        f.timeZone = timeZone
-        f.locale = Locale(identifier: "zh_CN")
-        return f.string(from: date)
+        if labelFormatter.timeZone != timeZone { labelFormatter.timeZone = timeZone }
+        return labelFormatter.string(from: date)
     }
 
     private func dayFile(_ dateKey: String) -> URL {
@@ -73,36 +78,36 @@ final class ScheduleStore: ObservableObject {
     /// - Parameters:
     ///   - dayKey: "yyyy-MM-dd"；start/end "HH:MM"（end 可为 "24:00"）
     ///   - note: 改主意的原因（比如「朋友约我吃火锅」），写进 changes
+    @discardableResult
     func adjust(dateKey: String, start: String, end: String,
                 activity: String, note: String,
-                location: String?, outfit: String? = nil, outfitNote: String? = nil) {
+                location: String?, detail: String? = nil, outfit: String? = nil, outfitNote: String? = nil) -> Bool {
+        guard let s = ScheduleItem.minutes(of: start), let e = ScheduleItem.minutes(of: end),
+              e > s, !activity.isEmpty else { return false }
         var day = loadDay(dateKey: dateKey) ?? DaySchedule(date: dateKey)
-        let s = ScheduleItem.minutes(of: start) ?? 0
-        let e = min(1440, ScheduleItem.minutes(of: end) ?? 1440)
-        guard e > s, !activity.isEmpty else { return }
 
         // 1. 从现有条目里把 [s, e) 剪掉：整段删除 / 尾部截断 / 中间拆两半
         var kept: [ScheduleItem] = []
         for item in day.items {
             if item.endMinute <= s || item.startMinute >= e {
                 kept.append(item)                                   // 无交集
-            } else if item.startMinute < s && item.endMinute > e {
-                kept.append(ScheduleItem(start: item.start, end: start,       // 中间 → 拆两半
-                                         activity: item.activity, location: item.location, detail: item.detail))
-                kept.append(ScheduleItem(start: end, end: item.end,
-                                         activity: item.activity, location: item.location, detail: item.detail))
-            } else if item.startMinute < s {
-                kept.append(ScheduleItem(start: item.start, end: start,
-                                         activity: item.activity, location: item.location, detail: item.detail))
-            } else if item.endMinute > e {
-                kept.append(ScheduleItem(start: end, end: item.end,
-                                         activity: item.activity, location: item.location, detail: item.detail))
+                continue
+            }
+            if item.startMinute < s {
+                var before = item
+                before.end = start
+                kept.append(before)
+            }
+            if item.endMinute > e {
+                var after = item
+                after.start = end
+                kept.append(after)
             }
         }
 
         // 2. 插入新段 + 归一化补空档
         kept.append(ScheduleItem(start: start, end: end, activity: activity,
-                                 location: location, detail: nil,
+                                 location: location, detail: detail,
                                  outfit: outfit?.isEmpty == true ? nil : outfit,
                                  outfitNote: outfitNote?.isEmpty == true ? nil : outfitNote))
         day.items = ScheduleNormalizer.normalize(kept)
@@ -112,6 +117,7 @@ final class ScheduleStore: ObservableObject {
         changes.append(ScheduleChange(at: Date(), note: note))
         day.changes = Array(changes.suffix(10))
         saveDay(day)
+        return true
     }
 
     /// 删除一条或多条并归一化补空档（日程管理页的左滑删除走这里）。
@@ -166,7 +172,8 @@ final class ScheduleStore: ObservableObject {
         var out: [String] = ["# \(characterName)此刻的生活（背景，别在回复里提到这段说明本身）"]
 
         // 时间档：默认半小时粒度（「约 10:00」），跟桌面插件 inject.precision=halfhour 一致
-        let cal = Calendar.current
+        var cal = Calendar.current
+        cal.timeZone = timeZone
         let minute = cal.component(.minute, from: now)
         let hour = cal.component(.hour, from: now)
         let timeLabel = "约 \(ScheduleItem.clock(minutes: hour * 60 + (minute / 30) * 30))"
@@ -205,9 +212,9 @@ final class ScheduleStore: ObservableObject {
         }
 
         // 傍晚（18:00 后）附上明天的安排
-        if nowMinute >= 1080, let tomorrowKey = Self.dayKey(for: "tomorrow", now: now),
-           let tomorrow = loadDay(dateKey: tomorrowKey), !tomorrow.items.isEmpty {
-            let tomorrowLabel = Self.dateLabel(for: tomorrowKey.toDate() ?? now, timeZone: timeZone)
+        if nowMinute >= 1080, let nextDay = cal.date(byAdding: .day, value: 1, to: now),
+           let tomorrow = loadDay(dateKey: Self.dateKey(for: nextDay, timeZone: timeZone)), !tomorrow.items.isEmpty {
+            let tomorrowLabel = Self.dateLabel(for: nextDay, timeZone: timeZone)
             let main = tomorrow.items.filter { !$0.isSleep }.prefix(5)
                 .map(\.activity).joined(separator: "、")
             var line = "明天（\(tomorrowLabel)，\(tomorrow.dayTypeName ?? "")）她打算：\(tomorrow.title ?? "")"

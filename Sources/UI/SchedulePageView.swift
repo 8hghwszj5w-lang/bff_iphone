@@ -33,6 +33,9 @@ struct SchedulePageView: View {
     }
 
     var body: some View {
+        // 一次渲染共享同一份日程；不要让每个分支都同步读盘、解码 JSON。
+        let day = self.day
+        let nowMinute = minutes(Date())
         Form {
             Section {
                 Picker("哪一天", selection: $dayOffset) {
@@ -60,8 +63,8 @@ struct SchedulePageView: View {
                 if day.items.isEmpty {
                     Text("这一天还没有安排").font(.footnote).foregroundStyle(.secondary)
                 } else {
-                    ForEach(Array(day.items.enumerated()), id: \.offset) { index, item in
-                        timelineRow(index: index, item: item)
+                    ForEach(day.items.indices, id: \.self) { index in
+                        timelineRow(item: day.items[index], nowMinute: nowMinute)
                     }
                     .onDelete { store.removeItems(dateKey: dateKey, offsets: $0) }
                 }
@@ -152,9 +155,7 @@ struct SchedulePageView: View {
         }
     }
 
-    private func timelineRow(index: Int, item: ScheduleItem) -> some View {
-        let nowMinute = Calendar.current.component(.hour, from: Date()) * 60
-            + Calendar.current.component(.minute, from: Date())
+    private func timelineRow(item: ScheduleItem, nowMinute: Int) -> some View {
         let isCurrent = dayOffset == 0 && item.startMinute <= nowMinute && nowMinute < item.endMinute
         return HStack {
             VStack(alignment: .leading, spacing: 3) {

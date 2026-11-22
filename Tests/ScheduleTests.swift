@@ -153,6 +153,57 @@ final class ScheduleTests: XCTestCase {
         XCTAssertTrue(bad.contains("error"), "非法时间应返回错误")
     }
 
+    func testScheduleToolRejectsInvalidUpdatesWithoutChangingEitherDay() async throws {
+        let tool = ScheduleAdjustTool(store: store)
+        for name in ["today", "yesterday"] {
+            let key = try XCTUnwrap(ScheduleStore.dayKey(for: name))
+            let original = DaySchedule(date: key, items: [
+                ScheduleItem(start: "00:00", end: "24:00", activity: "原安排")
+            ])
+            store.saveDay(original)
+            let ranges = name == "today" ? [("xx:00", "12:00"), ("10::00", "12:00"), ("10:00", "24:01"), ("12:00", "11:00")] : [("10:00", "12:00")]
+            for (start, end) in ranges {
+                let reply = await tool.run(argumentsJSON: """
+                {"day":"\(name)","start":"\(start)","end":"\(end)","activity":"新安排","reason":"测试"}
+                """)
+                XCTAssertTrue(reply.contains("error"), reply)
+                XCTAssertEqual(store.loadDay(dateKey: key), original)
+            }
+        }
+    }
+
+    func testScheduleToolPreservesDetailsWhenSplitting() async throws {
+        let key = try XCTUnwrap(ScheduleStore.dayKey(for: "today"))
+        let original = ScheduleItem(start: "00:00", end: "24:00", activity: "读书", location: "家", detail: "读小说", outfit: "毛衣", outfitNote: "蓝色")
+        store.saveDay(DaySchedule(date: key, items: [original]))
+        _ = await ScheduleAdjustTool(store: store).run(argumentsJSON: """
+        {"start":"10:00","end":"12:00","activity":"出门","reason":"约好了","detail":"去见朋友"}
+        """)
+        var before = original, after = original
+        before.end = "10:00"
+        after.start = "12:00"
+        let items = try XCTUnwrap(store.loadDay(dateKey: key)?.items)
+        XCTAssertEqual(items, [before, ScheduleItem(start: "10:00", end: "12:00", activity: "出门", detail: "去见朋友"), after])
+    }
+
+    func testInjectionUsesRequestedZoneForActivityAndTomorrowAcrossMidnight() throws {
+        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-01-01T10:45:00Z"))
+        let west = try XCTUnwrap(TimeZone(secondsFromGMT: -12 * 3600)) // 12/31 22:45
+        let east = try XCTUnwrap(TimeZone(secondsFromGMT: 9 * 3600))   // 1/1 19:45
+        for key in ["2025-12-31", "2026-01-01", "2026-01-02"] {
+            store.saveDay(DaySchedule(date: key, title: key, items: [
+                ScheduleItem(start: "18:00", end: "21:00", activity: "散步"),
+                ScheduleItem(start: "21:00", end: "24:00", activity: "读书")
+            ]))
+        }
+        for (zone, time, activity, tomorrow) in [(west, "22:30", "读书", "2026-01-01"), (east, "19:30", "散步", "2026-01-02"), (west, "22:30", "读书", "2026-01-01")] {
+            let text = store.injectionText(now: now, timeZone: zone)
+            XCTAssertTrue(text.contains("约 \(time)"))
+            XCTAssertTrue(text.contains("她正在：\(activity)"))
+            XCTAssertTrue(text.contains("她打算：\(tomorrow)"))
+        }
+    }
+
     // MARK: 工具
 
     private func dateAt(hour: Int, minute: Int) -> Date {
