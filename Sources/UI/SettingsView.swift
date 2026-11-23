@@ -466,7 +466,7 @@ struct MemoryView: View {
                 TextEditor(text: $summaryDraft)
                     .font(.footnote)
                     .frame(minHeight: 120)
-                    .onChange(of: summaryDraft) { newValue in
+                    .onChange(of: summaryDraft) { _, newValue in
                         summaryDirty = newValue != app.memory.record.summary
                     }
                 if summaryDirty {
@@ -585,7 +585,7 @@ struct ChatBackgroundView: View {
         .background(Color(.systemGroupedBackground).ignoresSafeArea())
         .navigationTitle("聊天背景")
         .navigationBarTitleDisplayMode(.inline)
-        .onChange(of: pickedItem) { item in
+        .onChange(of: pickedItem) { _, item in
             guard let item else { return }
             loadFailed = false
             Task {

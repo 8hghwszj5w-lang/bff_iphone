@@ -29,14 +29,26 @@ final class CallViewModel {
         let granted = await AVAudioApplication.requestRecordPermission()
         return granted ? nil : "没有麦克风权限：请到 设置 → 隐私与安全性 → 麦克风 里允许「分身」。"
     }
-    @ObservationIgnored var configureAudioSession: () throws -> Void = {
+    @ObservationIgnored var configureAudioSession: () async throws -> Void = {
         let session = AVAudioSession.sharedInstance()
         try session.setCategory(.playAndRecord, mode: .voiceChat,
-                                options: [.defaultToSpeaker, .allowBluetooth, .duckOthers])
-        try session.setActive(true)
+                                options: [.defaultToSpeaker, .allowBluetoothHFP, .duckOthers])
+        // 锁定 48kHz：与播放图格式一致，避免 TTS 开播/停播引起硬件采样率重协商
+        // （重协商瞬间 tap 会产出非法 buffer，是通话闪退的诱因）。失败不致命，忽略。
+        try? session.setPreferredSampleRate(48_000)
+        // 5ms IO 缓冲：降低 收音→识别 与 播放入队→出声 两端的延迟（voiceChat 典型值）
+        try? session.setPreferredIOBufferDuration(0.005)
+        // iOS 27 异步激活：同步 setActive 在主线程可能卡 UI（系统警告）
+        try await AudioSessionActivation.activate(session)
     }
-    @ObservationIgnored var deactivateAudioSession: () -> Void = {
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+    @ObservationIgnored var deactivateAudioSession: () async -> Void = {
+        let session = AVAudioSession.sharedInstance()
+        await AudioSessionActivation.deactivate(session)
+        // ⚠️ 通话结束必须把会话类别/模式复位：残留的 playAndRecord + voiceChat
+        // 会让后续页面（对比页试听）被误判为「通话进行中」而跳过重配——
+        // 本地 AVSpeechSynthesizer 在 VoIP 输出配置下静音，自建播放引擎在
+        // voiceChat 模式的输出处理下出杂音。复位放在去激活之后，不影响本通电话。
+        try? session.setCategory(.playback, mode: .spokenAudio)
     }
 
     @ObservationIgnored private var startupTask: Task<Void, Never>?
@@ -44,7 +56,6 @@ final class CallViewModel {
     @ObservationIgnored private var cleanupTask: Task<Void, Never>?
     @ObservationIgnored private var callID: UUID?
     @ObservationIgnored private var turnID: UUID?
-    @ObservationIgnored private var bargeInBaseline = 0
     @ObservationIgnored private var cloudDownUntil = Date.distantPast
 
     /// 轮次数据不共享，避免取消中的旧轮读取/覆盖新轮的文本、分句和首音指标。
@@ -80,14 +91,19 @@ final class CallViewModel {
     }
 
     static func make(pipeline: Pipeline, settings: SettingsStore) -> CallViewModel {
-        CallViewModel(
+        // 先建识别会话，再让播放器接入同一引擎（单引擎会话，见 Protocols 注释）
+        let speechSession = SpeechSessionFactory.makeBest()
+        let player = speechSession.sharedAudioEngine
+            .map { StreamingAudioPlayer(sharedEngine: $0) }
+            ?? StreamingAudioPlayer()
+        return CallViewModel(
             llm: PipelineLLMClient(pipeline: pipeline),
             localTTS: LocalAVSpeechTTSEngine(),
             cloudTTS: DeepSeekTTSStreamingEngine(config: .init(
                 apiKey: settings.apiKey,
                 ttsURL: DeepSeekTTSStreamingEngine.ttsURL(fromBase: settings.baseURL)
                     ?? URL(string: "https://api.deepseek.com/v1/tools/tts")!)),
-            player: StreamingAudioPlayer(), speechSession: SpeechSessionFactory.makeBest())
+            player: player, speechSession: speechSession)
     }
 
     // MARK: 开始 / 挂断
@@ -127,7 +143,7 @@ final class CallViewModel {
         guard isCurrentCall(id), !Task.isCancelled else { return }
         if let denied { failCall(denied); return }
         do {
-            try configureAudioSession()
+            try await configureAudioSession()
             do {
                 try await speechSession.start()
             } catch {
@@ -162,13 +178,16 @@ final class CallViewModel {
         let previous = cleanupTask
         cleanupTask = Task {
             await previous?.value
-            await speechSession.stop()
+            // 顺序有意为之：先停播放节点（挂起的 dataPlayedBack 会收到完成回调，
+            // awaitDrained 不会挂住），再停本地合成，最后停麦克风引擎——
+            // 播放节点挂在同一引擎上，引擎必须最后停；引擎停完再释放会话。
             await player.shutdown()
             localTTS.stopSpeaking()
+            await speechSession.stop()
             // 取消不一定立即结束权限弹窗/识别安装，不能在旧启动完成前重开音频。
             await starting?.value
             await turning?.value
-            deactivateAudioSession()
+            await deactivateAudioSession()
         }
         phase = .idle
         liveTranscript = ""
@@ -192,12 +211,21 @@ final class CallViewModel {
         switch event {
         case .partial(let text):
             liveTranscript = text
-            if phase == .speaking, text.count > bargeInBaseline + 1 { interruptNow() }
+            // 句段级 partial（SpeechTranscriber 每个句段重发 volatile 文本，文本是
+            // 该句段自己的、不是全场累计）：speaking 期间出现非空 partial = 用户又开口
+            // 说话 → 打断。旧实现拿累计文本长度跟基线比较，在新语义下会一直不触发。
+            if phase == .speaking, !text.isEmpty { interruptNow() }
         case .final(let text):
-            guard phase == .listening else { return }
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { return }
+            // 她说话期间用户已说完一整句（没等到 partial 打断）：等同打断，
+            // 保留这句话继续走新一轮，不能因为 phase != .listening 丢掉。
+            if phase == .speaking { interruptNow() }
+            guard phase == .listening else { return }
             liveTranscript = trimmed
+            #if DEBUG
+            print("[Call] 轮次开始：\(trimmed)")
+            #endif
             let turn = Turn(id: UUID(), callID: callID)
             turnID = turn.id
             // 必须在排 Task 之前占用轮次，同一 tick 的第二个 final 不得并行启动。
@@ -253,7 +281,6 @@ final class CallViewModel {
                 for sentence in splitter.feed(delta) {
                     try checkActive(turn)
                     phase = .speaking
-                    bargeInBaseline = liveTranscript.count
                     let result = try await speakSentence(sentence, turn: turn)
                     try checkActive(turn)
                     merge(result, turn: turn, into: &metrics)
@@ -262,7 +289,6 @@ final class CallViewModel {
             try checkActive(turn)
             if let tail = splitter.flush() {
                 phase = .speaking
-                bargeInBaseline = liveTranscript.count
                 let result = try await speakSentence(tail, turn: turn)
                 try checkActive(turn)
                 merge(result, turn: turn, into: &metrics)
@@ -279,6 +305,11 @@ final class CallViewModel {
         metrics.replyText = reply
         metrics.e2eFirstAudioMs = turn.firstAudioMs
         metrics.totalMs = TurnMetrics.elapsedMs(since: turn.start)
+        #if DEBUG
+        let pathLabel = metrics.actualPath.isEmpty ? "-" : metrics.actualPath
+        let firstAudioLabel = metrics.e2eFirstAudioMs.map { "\(Int($0))ms" } ?? "-"
+        print("[Call] 一轮结束：路径=\(pathLabel) 首音=\(firstAudioLabel) 总耗时=\(Int(metrics.totalMs ?? 0))ms 降级=\(metrics.degraded)")
+        #endif
         recordMetrics(metrics)
         // 打断但尚无下一轮时保留埋点；挂断/新轮之后的旧结果不能改 UI。
         if callID == turn.callID, turnID == turn.id || turnID == nil { lastMetrics = metrics }
@@ -303,9 +334,11 @@ final class CallViewModel {
         if shouldUseCloud(), let cloud = cloudTTS {
             do {
                 let start = Date()
+                var chunkCount = 0
                 for try await chunk in cloud.synthesize(text: sentence) {
                     try checkActive(turn)
                     guard !chunk.pcm.isEmpty else { continue }
+                    chunkCount += 1
                     if result.ttsFirstPacketMs == nil {
                         result.ttsFirstPacketMs = TurnMetrics.elapsedMs(since: start)
                     }
@@ -316,6 +349,9 @@ final class CallViewModel {
                     result.actualPath = "cloud"
                 }
                 try checkActive(turn)
+                #if DEBUG
+                print("[Call] 云端 TTS 分片数=\(chunkCount)（「\(sentence.prefix(10))」）")
+                #endif
                 return result
             } catch {
                 try checkActive(turn) // URLError.cancelled 等取消不能误触发本地降级。

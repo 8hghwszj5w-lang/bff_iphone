@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 
 // MARK: - 通话功能共享类型：路由开关 / 状态机 / 分句 / 埋点
@@ -7,6 +8,45 @@ import Foundation
 // · deepSeek  本地 STT → LLM 流式文本 → DeepSeek TTS API（POST /v1/tools/tts，
 //             响应体流式 24kHz/16bit/单声道 PCM）→ 流式播放
 // · autoFallback  先试 deepSeek，失败自动降级 local（无感）
+
+// MARK: - 音频会话激活（主线程不阻塞、永不挂起）
+//
+// 两条约束决定了这里的实现：
+// ① iOS 27 起系统对「主线程」同步 setActive 发出警告（AVAudioSession_iOS.mm:978）：
+//    路由协商（尤其蓝牙）可能阻塞主线程数百毫秒 → 通话启动/挂断时 UI 卡顿。
+// ② iOS 27 新增的异步 activate/deactivate API 在 27.3 beta 真机上完成回调
+//    不触发 → 启动任务永久挂起 → 清理任务等它收尾 → 之后每次重拨都卡死，
+//    只能重装 App。beta 新 API 不可依赖。
+//
+// 方案：AVAudioSession 线程安全，把同步 setActive 放到后台线程执行——
+// 不阻塞主线程（警告只针对主线程调用）、不依赖任何新 API、同步调用必然
+// 返回（成功或抛错），结构上不存在永久挂起路径。全系统版本同一行为。
+enum AudioSessionActivation {
+    /// 激活会话。失败抛错（调用方决定降级/提示）；任务取消不会中断激活本身，
+    /// 续体必然被 resume（不会泄漏）；陈旧启动由调用方的代次检查拦截。
+    static func activate(_ session: AVAudioSession) async throws {
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            Task.detached(priority: .userInitiated) {
+                do {
+                    try session.setActive(true)
+                    cont.resume()
+                } catch {
+                    cont.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    /// 去激活会话（通知被打断的应用可以续播）。失败不抛错：挂断清理必须走完。
+    static func deactivate(_ session: AVAudioSession) async {
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            Task.detached(priority: .userInitiated) {
+                try? session.setActive(false, options: .notifyOthersOnDeactivation)
+                cont.resume()
+            }
+        }
+    }
+}
 
 /// TTS 路由开关（运行时可切，不必重启通话——下一句就用新路径）
 enum TTSRoute: String, CaseIterable, Identifiable {
@@ -51,41 +91,48 @@ enum CallPhase: Equatable {
 
 /// 从 LLM 的字符增量里切出完整句子。
 /// 规则：中英常见句末标点 + 换行；"点号两侧都是数字"（3.14 / 2.5）不当句号。
+///
+/// 性能：只扫描本次新到的字符。缓冲里留存的字符判定已定型——唯一依赖上下文的
+/// 是「.」（需要前后邻字符），而旧规则下缓冲末尾的「.」因缺后继会被立即当句末
+/// 切走，不会留存；留存字符的邻字符不会再变，无需每片重扫全缓冲。
 struct SentenceSplitter {
-    private var buffer = ""
+    /// 尚未凑满一句的尾巴（只含已判定为非句末的字符）
+    private var chars: [Character] = []
     /// 想调整切句粒度（比如把逗号也切开换更快首音但更生硬）改这个集合
     private let terminators: Set<Character> = ["。", "！", "？", "；", "…", "\n", "!", "?", ";"]
 
     /// 喂入增量，返回本次凑齐的完整句子（可能 0 ~ 多条）
     mutating func feed(_ delta: String) -> [String] {
-        buffer += delta
-        let chars = Array(buffer)
+        let oldCount = chars.count
+        chars.append(contentsOf: delta)
         var sentences: [String] = []
-        var sentenceStart = 0
-        for i in 0..<chars.count {
+        var segmentStart = 0
+        var i = oldCount
+        while i < chars.count {
             let ch = chars[i]
             let isSentenceEnd = terminators.contains(ch)
                 || (ch == "." && !(i > 0 && chars[i - 1].isNumber
                                    && i + 1 < chars.count && chars[i + 1].isNumber))
             if isSentenceEnd {
-                let sentence = String(chars[sentenceStart...i])
+                let sentence = String(chars[segmentStart...i])
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 if !sentence.isEmpty { sentences.append(sentence) }
-                sentenceStart = i + 1
+                segmentStart = i + 1
             }
+            i += 1
         }
-        buffer = sentenceStart < chars.count ? String(chars[sentenceStart...]) : ""
+        if segmentStart > 0 { chars.removeFirst(segmentStart) }
         return sentences
     }
 
     /// 流结束后把没凑满一句的尾巴交出来
     mutating func flush() -> String? {
-        let tail = buffer.trimmingCharacters(in: .whitespacesAndNewlines)
-        buffer = ""
+        let tail = String(chars).trimmingCharacters(in: .whitespacesAndNewlines)
+        chars = []
         return tail.isEmpty ? nil : tail
     }
 
-    mutating func reset() { buffer = "" }
+    mutating func reset() { chars = [] }
 }
 
 // MARK: - 延迟埋点（TTS 首包 / LLM TTFT / 端到端首音）

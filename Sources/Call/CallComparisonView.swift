@@ -46,9 +46,10 @@ struct CallComparisonView: View {
     /// 指标落盘（保存对比记录 + 历史列表数据源）
     @ObservedObject private var store = CallMetricsStore.shared
 
-    init(apiKey: String, baseURL: String) {
+    init(apiKey: String, baseURL: String, sharedPlayer: CallAudioPlayer? = nil) {
         self.apiKey = apiKey
         self.baseURL = baseURL
+        self.sharedPlayer = sharedPlayer
     }
 
     // MARK: 页面状态
@@ -81,8 +82,13 @@ struct CallComparisonView: View {
 
     /// 云端是否往播放器送过音频（本地开跑前据此决定要不要清掉云端余音，避免混音）
     @State private var cloudEverPlayed = false
-    /// 播放器跨两次云端合成复用（再次合成前先 stopAll）
-    @State private var player = StreamingAudioPlayer()
+    /// 播放器跨两次云端合成复用（再次合成前先 stopAll）。
+    /// 通话进行中打开对比页时，优先复用通话的播放器（与麦克风同一引擎），
+    /// 避免独立引擎与 voice-processing 引擎争抢会话 IO（无声/杂音）。
+    @State private var ownPlayer = StreamingAudioPlayer()
+    private let sharedPlayer: CallAudioPlayer?
+
+    private var player: CallAudioPlayer { sharedPlayer ?? ownPlayer }
 
     /// 任一路径在合成就禁用两个按钮（避免本地人声和云端音频叠在一起放）
     private var busy: Bool { isLocalRunning || isCloudRunning }
@@ -222,7 +228,7 @@ struct CallComparisonView: View {
         isLocalRunning = true
         defer { isLocalRunning = false }
         do {
-            activatePlaybackSession()
+            await activatePlaybackSession()
             // 每次新建一个引擎：speak 在整句念完（或取消）后才返回
             let engine = LocalAVSpeechTTSEngine()
             let firstAudio = FirstAudioBox()
@@ -265,7 +271,7 @@ struct CallComparisonView: View {
         isCloudRunning = true
         defer { isCloudRunning = false }
         do {
-            activatePlaybackSession()
+            await activatePlaybackSession()
             // 再次合成前先停掉上一轮（上一轮自然播完无需手动停，重播必须先清）
             await player.stopAll()
             let engine = DeepSeekTTSStreamingEngine(config: .init(apiKey: apiKey, ttsURL: ttsURL))
@@ -365,14 +371,23 @@ struct CallComparisonView: View {
 
     /// 播放前把音频会话切成 playback/spokenAudio：对比页不在通话中，这样静音键
     /// 不会把播放吞掉；已激活时重复调用无害。失败不阻塞（try?），只影响能否出声。
-    private func activatePlaybackSession() {
+    /// iOS 27 异步激活：主线程同步 setActive 可能卡 UI（系统警告）。
+    private func activatePlaybackSession() async {
         let session = AVAudioSession.sharedInstance()
         // ⚠️ 闪退修复：通话进行中绝不能改会话类别。通话页的识别引擎正带着
         // 麦克风 tap + voice processing 跑在 playAndRecord 上，这里改类别会让
         // 它的音频对象集体失效，真机上就是「通话中点开对比页就闪退/掉麦」。
-        guard !PlaybackSessionConfig.shouldPreserveCallCategory(current: session.category) else { return }
+        guard !PlaybackSessionConfig.shouldPreserveCallCategory(current: session.category) else {
+            #if DEBUG
+            print("[Compare] 会话仍为 playAndRecord（通话进行中？），保持不动")
+            #endif
+            return
+        }
         try? session.setCategory(.playback, mode: .spokenAudio)
-        try? session.setActive(true)
+        try? await AudioSessionActivation.activate(session)
+        #if DEBUG
+        print("[Compare] 试听会话就绪：类别=\(session.category.rawValue) 模式=\(session.mode.rawValue) 采样率=\(session.sampleRate)Hz 缓冲=\(session.ioBufferDuration)s")
+        #endif
     }
 }
 

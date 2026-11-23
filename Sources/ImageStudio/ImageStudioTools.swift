@@ -18,6 +18,8 @@ struct ImageGenerateTool: AgentTool {
             description: "生成一张图片并直接展示给用户。按画面描述和关键词（情境 / 神态 / 动作 / 镜头 / 光线），把本地参考库里选中的人物 / 服饰 / 场景 / 道具参考图一起交给生图模型：参考图只保证长相和设计一致，姿势表情构图由文字决定。何时调用见系统提示里的「生图」说明。",
             parameters: .object([
                 "type": .string("object"),
+                // 桌面端 schema 声明 additionalProperties: false，别让模型塞没定义的字段
+                "additionalProperties": .bool(false),
                 "properties": .object([
                     "prompt": .object([
                         "type": .string("string"),
@@ -65,7 +67,7 @@ struct ImageGenerateTool: AgentTool {
                     "extra_images": .object([
                         "type": .string("array"),
                         "items": .object(["type": .string("string")]),
-                        "description": .string("可选：要在其基础上修改的图（之前生成的图片编号 img-…），会作为第一张参考图。"),
+                        "description": .string("可选：要在其基础上修改的图（之前生成的图片编号 img-…，或本机图片绝对路径），会作为第一张参考图。"),
                     ]),
                     "aspect": .object([
                         "type": .string("string"),
@@ -90,6 +92,9 @@ struct ImageGenerateTool: AgentTool {
         do {
             let record = try await store.generate(args, source: "tool")
             return Self.successText(record)
+        } catch let cooldown as StudioCooldownMessage {
+            // 冷却中不是错误：按普通文本结果回给模型（桌面端 renderGenerate 也是这段文案）
+            return cooldown.message
         } catch is CancellationError {
             return "{\"error\": \"已取消\"}"
         } catch let error as StudioError {
@@ -109,12 +114,16 @@ struct ImageGenerateTool: AgentTool {
         }
         func str(_ key: String) -> String { (obj[key] as? String ?? "").trimmingCharacters(in: .whitespaces) }
         func list(_ key: String) -> [String] {
-            if let arr = obj[key] as? [String] { return arr }
-            if let s = obj[key] as? String, !s.trimmingCharacters(in: .whitespaces).isEmpty {
+            let raw: [String]
+            if let arr = obj[key] as? [String] {
+                raw = arr
+            } else if let s = obj[key] as? String, !s.trimmingCharacters(in: .whitespaces).isEmpty {
                 // 有些模型会把数组写成逗号分隔字符串
-                return s.split(whereSeparator: { ",，、".contains($0) }).map { $0.trimmingCharacters(in: .whitespaces) }
+                raw = s.split(whereSeparator: { ",，、".contains($0) }).map(String.init)
+            } else {
+                raw = []
             }
-            return []
+            return raw.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
         }
         args.prompt = str("prompt")
         args.situation = str("situation")
@@ -126,7 +135,8 @@ struct ImageGenerateTool: AgentTool {
         args.outfits = Array(list("outfits").prefix(12))
         args.scene = str("scene")
         args.props = Array(list("props").prefix(12))
-        args.extraImages = Array(list("extra_images").prefix(4))
+        // 桌面端 compose.js:21-22 对 extra_images 也按 12 条截断（原来这里是 4）
+        args.extraImages = Array(list("extra_images").prefix(12))
         args.aspect = str("aspect")
         args.caption = String(str("caption").prefix(300))
         args.userRequested = (obj["user_requested"] as? Bool) ?? false
@@ -136,12 +146,13 @@ struct ImageGenerateTool: AgentTool {
     /// 给模型的文字结果（要点沿用桌面端 renderGenerate）
     static func successText(_ record: ImageRecord) -> String {
         var lines: [String] = []
-        let seconds = Double(record.ms) / 1000
-        var head = "已生成图片 \(record.id)（\(record.model)"
-        if !record.size.isEmpty { head += " · \(record.size)" }
-        head += String(format: " · 用时 %.0f 秒）", seconds)
-        head += "，已经显示在对话里给用户看了。"
-        lines.append(head)
+        // 头部按桌面端 `[model, size, 用时].filter(Boolean).join(' · ')`：空值不占位；
+        // 用时至少显示 1 秒（毫秒级生成四舍五入后可能变 0）
+        var headParts: [String] = []
+        if !record.model.isEmpty { headParts.append(record.model) }
+        if !record.size.isEmpty { headParts.append(record.size) }
+        headParts.append("用时 \(max(1, Int((Double(record.ms) / 1000).rounded()))) 秒")
+        lines.append("已生成图片 \(record.id)（\(headParts.joined(separator: " · "))），已经显示在对话里给用户看了。")
         if let file = record.files.first { lines.append("文件：\(file)") }
         let labels = ["characters": "人物", "outfits": "服饰", "scenes": "场景", "props": "道具"]
         if !record.refs.isEmpty {
@@ -153,10 +164,13 @@ struct ImageGenerateTool: AgentTool {
             lines.append("用到的参考：\(parts.joined(separator: "、"))")
         }
         if !record.keywords.isEmpty {
-            let kwLabels = ["situation": "情境", "expression": "神态", "pose": "动作", "shot": "镜头", "light": "光线"]
-            let parts = record.keywords.sorted { $0.key < $1.key }
-                .map { "\(kwLabels[$0.key] ?? $0.key)「\($0.value)」" }
-            lines.append("关键词：\(parts.joined(separator: "、"))")
+            // 顺序与桌面端一致：情境 / 神态 / 动作 / 镜头 / 光线（不按字典键排序）
+            let kwOrder: [(String, String)] = [("situation", "情境"), ("expression", "神态"),
+                                               ("pose", "动作"), ("shot", "镜头"), ("light", "光线")]
+            let parts = kwOrder.compactMap { key, label in
+                record.keywords[key].map { "\(label)「\($0)」" }
+            }
+            if !parts.isEmpty { lines.append("关键词：\(parts.joined(separator: "、"))") }
         }
         if !record.notes.isEmpty { lines.append("说明：\(record.notes.joined(separator: "；"))") }
         if !record.unresolved.isEmpty {
@@ -182,6 +196,7 @@ struct ImageLibraryTool: AgentTool {
             description: "查询本地生图参考库（人物 / 服饰 / 场景 / 道具）：按关键词搜，或按 id 看某个条目的完整信息（人设、外观描述）。只在系统提示里的目录不够用时才需要。",
             parameters: .object([
                 "type": .string("object"),
+                "additionalProperties": .bool(false),
                 "properties": .object([
                     "category": .object([
                         "type": .string("string"),
@@ -201,17 +216,22 @@ struct ImageLibraryTool: AgentTool {
     }
 
     func run(argumentsJSON: String) async -> String {
-        var category: String?
-        var query: String?
-        var id: String?
-        if let data = argumentsJSON.data(using: .utf8),
-           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            category = obj["category"] as? String
-            query = obj["query"] as? String
-            id = obj["id"] as? String
-        }
+        // 先解析成不可变值再跨执行器传：闭包里捕获 var 在并发上下文是数据竞争，
+        // Swift 6 判为错误（#SendableClosureCaptures）。
+        let args = Self.parseArguments(argumentsJSON)
         return await MainActor.run {
-            store.libraryQueryText(category: category, query: query, id: id)
+            store.libraryQueryText(category: args.category, query: args.query, id: args.id)
         }
+    }
+
+    /// 解析工具入参（纯函数，结果全为 Sendable 值，可安全跨 actor 传递）
+    private static func parseArguments(
+        _ argumentsJSON: String
+    ) -> (category: String?, query: String?, id: String?) {
+        guard let data = argumentsJSON.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return (nil, nil, nil)
+        }
+        return (obj["category"] as? String, obj["query"] as? String, obj["id"] as? String)
     }
 }

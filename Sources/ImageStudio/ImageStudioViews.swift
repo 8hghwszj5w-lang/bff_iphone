@@ -272,7 +272,7 @@ struct StudioAddEntrySheet: View {
                 }
             }
         }
-        .onChange(of: pickedItems) { items in
+        .onChange(of: pickedItems) { _, items in
             Task {
                 var data: [Data] = []
                 for item in items {

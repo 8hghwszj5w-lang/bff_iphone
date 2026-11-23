@@ -60,8 +60,8 @@ struct ChatView: View {
                         .padding(.horizontal, 12)
                         .padding(.vertical, 16)
                     }
-                    .onChange(of: messages.count) { _ in scrollToBottom(proxy) }
-                    .onChange(of: messages.last?.text) { _ in scrollToBottom(proxy) }
+                    .onChange(of: messages.count) { scrollToBottom(proxy) }
+                    .onChange(of: messages.last?.text) { scrollToBottom(proxy) }
                 }
                 inputBar
             }
@@ -72,7 +72,7 @@ struct ChatView: View {
                 }
             }
             .sheet(isPresented: $showCalls){ PhoneView() }
-            .navigationTitle("大肥鱼")
+            .navigationTitle("梁小鱼")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItemGroup(placement: .topBarTrailing) {
@@ -83,8 +83,13 @@ struct ChatView: View {
             .onAppear {
                 if messages.isEmpty {
                     messages = app.memory.record.entries.map {
+                        // 气泡显示去掉 user 消息的时间戳前缀（记忆里保留完整带戳文本，
+                        // 模型靠它感知时间；见 TimeContext.stripStamp）。
                         // 她画过的图随记忆条目一起恢复（路径指向沙盒 outputs/）
-                        ChatMessageView(role: $0.role, text: $0.content, images: $0.images ?? [])
+                        let text = $0.role == "user"
+                            ? TimeContext.stripStamp(from: $0.content)
+                            : $0.content
+                        return ChatMessageView(role: $0.role, text: text, images: $0.images ?? [])
                     }
                 }
                 // 自动日程生成：今天没日程立刻补，22:00 后补明天（内部有冷却，幂等）
@@ -92,7 +97,7 @@ struct ChatView: View {
                 // 主动消息引擎：启动时也做一次「回前台」处理（catch-up 冻结期间到点的闹铃）
                 app.proactive.handleActive()
             }
-            .onChange(of: scenePhase) { phase in
+            .onChange(of: scenePhase) { _, phase in
                 // 主动消息引擎的前后台衔接：回前台清预约通知 + catch-up；退后台预约敲门通知
                 switch phase {
                 case .active: app.proactive.handleActive()
@@ -193,14 +198,14 @@ struct ChatView: View {
             }
             .ignoresSafeArea()
         }
-        .onChange(of: photoItem) { item in
+        .onChange(of: photoItem) { _, item in
             guard let item else { return }
             showAttachmentPanel = false
             loadPhoto(item)
             photoItem = nil
         }
         // 键盘弹起时自动收起面板（互斥，同微信）
-        .onChange(of: inputFocused) { focused in
+        .onChange(of: inputFocused) { _, focused in
             if focused { showAttachmentPanel = false }
         }
     }

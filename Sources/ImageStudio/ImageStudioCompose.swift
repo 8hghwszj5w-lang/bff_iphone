@@ -11,8 +11,9 @@ import Foundation
 //  6. 给每张参考图编号并写明「只取什么」——参考图只管长相与设计，
 //     姿势、表情、视角、构图都由文字决定（不然出图会照抄参考图的姿势）。
 //
-// 注：extra_images（在上一张图基础上改）由 Store 在 compose 之后解析并插到 refs 最前面，
-// 因为要查生成历史才能把 img- 编号换成本地文件。
+// 注：extra_images（在上一张图基础上改）由 Store 先解析成 StudioExtraInput（查历史 / 读本机绝对路径），
+// 再交给 compose——编号、参考图预算和提示词里的「图N：上一张生成图…」行都在 compose 里统一排
+//（对应桌面端 compose.js:161-165 / 186-192 / 225-232）。
 
 /// 一张参考图（发给 API 的一张 + 提示词里的一行说明）
 struct StudioRef: Equatable {
@@ -23,6 +24,12 @@ struct StudioRef: Equatable {
     var name: String?
     var file: String?
     var url: URL?
+}
+
+/// extra_images 的一条：原始引用 + 解析结果（nil 表示解析不了，只进 unresolved，不占参考图预算）
+struct StudioExtraInput {
+    var raw: String
+    var ref: StudioRef?
 }
 
 /// 一次组合的结果
@@ -48,6 +55,10 @@ struct StudioScheduleContext {
     var activity: String
     var outfit: String          // 这一段的穿搭（服饰库名字，可能不在库里）
     var outfitNote: String      // 穿搭细节补充
+    /// 这一段对应的生图场景名（对应 ScheduleItem.scene）：和这次画的场景不一致就不沿用穿搭
+    var scene: String = ""
+    /// 这一段对应的生图情境关键词（对应 ScheduleItem.situation）
+    var situation: String = ""
 }
 
 enum ImageStudioComposer {
@@ -138,13 +149,13 @@ enum ImageStudioComposer {
     // MARK: 主流程
 
     /// 把工具参数组合成一次生图请求（对应 compose.js compose）。
-    /// extraCount：要在其基础上修改的上一张图数量（extra_images），会占掉参考图张数预算。
+    /// extras：已解析的 extra_images（历史 id / 本机绝对路径 → 文件），按上传顺序排在最前、占参考图预算。
     static func compose(_ args: StudioGenerateArgs,
                         config: StudioConfig,
                         library: [StudioCategory: [LibraryEntry]],
                         presets: StudioPresets,
                         schedule: StudioScheduleContext? = nil,
-                        extraCount: Int = 0) -> StudioPlan {
+                        extras: [StudioExtraInput] = []) -> StudioPlan {
         var plan = StudioPlan()
         var notes: [String] = []
         var unresolved: [String] = []
@@ -240,7 +251,15 @@ enum ImageStudioComposer {
         // 服饰兜底：日程此刻的穿着 > 人物的情境穿搭 > 情境默认 > 场景默认 > 人物默认
         var dressed = Set<String>()
         if outfits.isEmpty, config.compose.followSchedule, !charactersFinal.isEmpty, let sched = schedule {
-            let her = resolveHer(config: config, library: library, scheduleName: sched.characterName)
+            // 场景守卫（对应桌面端 schedule-link.js:90-93）：画的场景和日程此刻的场景不是同一个，
+            // 说明画的不一定是「此刻」，就不沿用日程里的穿搭。
+            var sceneMismatch = false
+            if let drawnScene = scene, !sched.scene.isEmpty,
+               let scheduledScene = resolveRef(.scenes, sched.scene, library: library),
+               scheduledScene.id != drawnScene.id {
+                sceneMismatch = true
+            }
+            let her = sceneMismatch ? nil : resolveHer(config: config, library: library, scheduleName: sched.characterName)
             for c in charactersFinal {
                 guard let her, her.id == c.id else { continue }
                 let outfitName = sched.outfit.trimmingCharacters(in: .whitespaces)
@@ -290,6 +309,16 @@ enum ImageStudioComposer {
             }
         }
 
+        // ---- 上一张图（extra_images）：只有解析成功（历史记录 / 本机绝对路径）的才占参考图预算 ----
+        var extraRefs: [StudioRef] = []
+        for input in extras {
+            if let ref = input.ref {
+                extraRefs.append(ref)
+            } else {
+                unresolved.append("参考图「\(input.raw)」")
+            }
+        }
+
         // ---- 挑参考图 ----
         var ordered = charactersFinal + outfits + (scene.map { [$0] } ?? []) + plan.props
         var seen = Set<String>()
@@ -298,7 +327,7 @@ enum ImageStudioComposer {
         func quota(_ e: LibraryEntry) -> Int {
             e.category == .characters ? max(1, config.compose.refsPerCharacter) : max(1, config.compose.refsPerOther)
         }
-        let budget = max(0, config.compose.maxRefs - max(0, extraCount))
+        let budget = max(0, config.compose.maxRefs - extraRefs.count)
         var chosen: [String: [String]] = [:]   // entryKey → 已选文件名
         var used = 0
         var round = 0
@@ -318,7 +347,8 @@ enum ImageStudioComposer {
             notes.append("参考图超过上限 \(config.compose.maxRefs) 张，没放进去：\(dropped.map(\.name).joined(separator: "、"))（只按文字描述）")
         }
 
-        var refs: [StudioRef] = []
+        // 顺序即上传顺序：上一张图在最前，其余按 人物 > 服饰 > 场景 > 道具
+        var refs: [StudioRef] = extraRefs
         for e in ordered {
             for f in chosen[entryKey(e)] ?? [] {
                 refs.append(StudioRef(kind: "entry", label: "\(e.category.label)「\(e.name)」",
@@ -372,6 +402,10 @@ enum ImageStudioComposer {
             let a = n + 1
             n += count
             return count == 1 ? "图\(a)" : "图\(a)–\(n)"
+        }
+        // 上一张图占最前面的编号，并单独写一行「在它的基础上改，没提到的保持不变」（对应 compose.js:225-232）
+        if !extraRefs.isEmpty {
+            lines.append("\(rangeLabel(extraRefs.count))：\(extraRefs.map(\.label).joined(separator: "、"))——在它的基础上按要求修改，没提到要改的部分保持不变。")
         }
         for e in ordered {
             let cnt = chosen[entryKey(e)]?.count ?? 0

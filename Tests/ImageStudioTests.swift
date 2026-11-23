@@ -219,12 +219,67 @@ final class ImageStudioTests: XCTestCase {
         args.prompt = "改一张"
         args.characters = ["小鱼"]
         args.scene = "街道"                     // 预算不够时它会被落选并记进说明
-        args.extraImages = ["img-old"]          // 占 1 张预算
+        let extra = StudioExtraInput(raw: "img-old", ref: Self.extraRef("img-old"))
         let plan = ImageStudioComposer.compose(args, config: config, library: makeLibrary(),
-                                               presets: StudioDefaultPresets.presets, extraCount: 1)
-        // 人物 2 张配额 ×（预算 2）→ 只挑 2 张：fish front + outfit 01（无第三张余量给场景）
-        XCTAssertEqual(plan.refs.count, 2)
+                                               presets: StudioDefaultPresets.presets, extras: [extra])
+        // 上一张图占 1 张 → 条目只剩 2 张预算：fish front + outfit 01（无余量给场景）
+        XCTAssertEqual(plan.refs.filter { $0.kind == "entry" }.count, 2)
         XCTAssertTrue(plan.notes.contains { $0.contains("参考图超过上限") }, "notes=\(plan.notes) refs=\(plan.refs.count) chosenScene=\(plan.scene?.id ?? "nil")")
+    }
+
+    func testExtraImagesNumberingAndPromptLine() {
+        var args = StudioGenerateArgs()
+        args.prompt = "把背景换成海边"
+        args.characters = ["小鱼"]
+        args.scene = "街道"
+        let extra = StudioExtraInput(raw: "img-20261119-120000-abcd", ref: Self.extraRef("img-20261119-120000-abcd"))
+        let plan = ImageStudioComposer.compose(args, config: StudioConfig(), library: makeLibrary(),
+                                               presets: StudioDefaultPresets.presets, extras: [extra])
+        // 上一张图排在最前，编号图1；条目从图2开始（原来 Store 前插但 compose 的编号从 1 起 → 整体错位）
+        XCTAssertEqual(plan.refs.first?.kind, "extra")
+        XCTAssertTrue(plan.finalPrompt.contains("图1：上一张生成图（img-20261119-120000-abcd）——在它的基础上按要求修改，没提到要改的部分保持不变。"),
+                      plan.finalPrompt)
+        XCTAssertTrue(plan.finalPrompt.contains("图2–3：人物「小鱼」"), plan.finalPrompt)
+        let ordered = plan.refs.filter { $0.kind == "entry" }
+        XCTAssertEqual(ordered.first?.entryId, "小鱼")
+        XCTAssertEqual(ordered.first?.file, "front.png", "人物两张参考图都该保留")
+    }
+
+    func testUnresolvedExtraDoesNotConsumeBudget() {
+        var config = StudioConfig()
+        config.compose.maxRefs = 3
+        var args = StudioGenerateArgs()
+        args.prompt = "改一张"
+        args.characters = ["小鱼"]
+        args.scene = "街道"
+        let bad = StudioExtraInput(raw: "img-不存在", ref: nil)
+        let plan = ImageStudioComposer.compose(args, config: config, library: makeLibrary(),
+                                               presets: StudioDefaultPresets.presets, extras: [bad])
+        // 解析不了的引用不占预算：条目照旧挑满 3 张
+        XCTAssertEqual(plan.refs.count, 3)
+        XCTAssertTrue(plan.unresolved.contains("参考图「img-不存在」"))
+        XCTAssertFalse(plan.finalPrompt.contains("在它的基础上按要求修改"), "没解析成功就不该有改图说明")
+    }
+
+    func testScheduleSceneMismatchSkipsOutfitLink() {
+        // 桌面 schedule-link.js:90-93：画的场景和日程此刻的 scene 不一致，就不沿用日程穿搭
+        let schedule = StudioScheduleContext(characterName: "小鱼", start: "14:00", end: "16:00",
+                                             activity: "在家休息", outfit: "外出连衣裙",
+                                             outfitNote: "", scene: "卧室")
+        var args = StudioGenerateArgs()
+        args.prompt = "在街上"
+        args.characters = ["小鱼"]
+        args.scene = "街道"
+        let mismatch = ImageStudioComposer.compose(args, config: StudioConfig(), library: makeLibrary(),
+                                                   presets: StudioDefaultPresets.presets, schedule: schedule)
+        XCTAssertFalse(mismatch.outfits.contains { $0.id == "外出连衣裙" })
+        XCTAssertFalse(mismatch.notes.contains { $0.contains("沿用") })
+
+        args.scene = "卧室"   // 场景一致 → 沿用
+        let matched = ImageStudioComposer.compose(args, config: StudioConfig(), library: makeLibrary(),
+                                                  presets: StudioDefaultPresets.presets, schedule: schedule)
+        XCTAssertTrue(matched.outfits.contains { $0.id == "外出连衣裙" })
+        XCTAssertTrue(matched.notes.contains { $0.contains("沿用") })
     }
 
     func testAspectNormalization() {

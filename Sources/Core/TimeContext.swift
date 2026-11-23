@@ -10,6 +10,9 @@ import Foundation
 //   随消息一起写进记忆窗口。模型在窗口里看到相邻两条的时间戳，就"看见"了
 //   时间流逝；隔了多久会另外附 gap 文案（见 gapText）。
 //
+// 显示边界：戳只给模型看，不进气泡。历史恢复时 ChatView 用 stripStamp 去掉
+// 前缀再渲染；实时发送的气泡用的是原文，也没有戳。
+//
 // 改格式注意：方括号用全角「［］」，与正文区分度更高；字段顺序固定便于模型读。
 
 enum TimeContext {
@@ -63,5 +66,21 @@ enum TimeContext {
             prefix += "（\(gap)）"
         }
         return text.isEmpty ? prefix : "\(prefix) \(text)"
+    }
+
+    /// 去掉用户消息开头的「［时间戳］（距…）」前缀——只用于气泡显示。
+    /// 模型与记忆窗口继续看完整带戳文本（时间感知靠它），界面不该被戳污染。
+    /// 只有「yyyy-MM-dd HH:mm 周X」形态才当时间戳，避免误伤以 ［ 开头的正常文本。
+    static func stripStamp(from text: String) -> String {
+        guard text.hasPrefix("［"), let close = text.firstIndex(of: "］") else { return text }
+        let inner = text[text.index(after: text.startIndex)..<close]
+        guard inner.range(of: #"^\d{4}-\d{2}-\d{2} \d{2}:\d{2} .+$"#,
+                          options: .regularExpression) != nil else { return text }
+        var rest = String(text[text.index(after: close)...])
+        if rest.hasPrefix("（距上一条已过去"), let gapEnd = rest.firstIndex(of: "）") {
+            rest = String(rest[rest.index(after: gapEnd)...])
+        }
+        if rest.hasPrefix(" ") { rest.removeFirst() }
+        return rest
     }
 }

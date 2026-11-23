@@ -49,7 +49,7 @@ struct ScheduleAdjustTool: AgentTool {
     var definition: ToolDefinition {
         ToolDefinition(function: .init(
             name: "schedule_adjust",
-            description: "她临时改主意时记一下：用新的一段覆盖某个时间段（原来的打算会被截断或拆开）。比如被约出去吃饭、突然想去散步、活干不完要加班、换了身衣服。只改真的变了的部分。这是她给自己记事用的：回复里直接说她的决定（「那我不出门啦」），别说「我改一下日程 / 调整计划」。",
+            description: "她临时改主意时记一下：用新的一段覆盖某个时间段（原来的打算会被截断或拆开）。比如被约出去吃饭、突然想去散步、活干不完要加班、换了身衣服。只改真的变了的部分；没写 outfit / outfit_note 时沿用那个时间点原本的穿着。这是她给自己记事用的：回复里直接说她的决定（「那我不出门啦」），别说「我改一下日程 / 调整计划」。",
             parameters: .object([
                 "type": .string("object"),
                 "properties": .object([
@@ -68,12 +68,16 @@ struct ScheduleAdjustTool: AgentTool {
                                          "description": .string("在哪。")]),
                     "detail": .object(["type": .string("string"),
                                        "description": .string("一两句当时的状态或小插曲。")]),
+                    "situation": .object(["type": .string("string"),
+                                          "description": .string("可选：对应的生图情境关键词。")]),
+                    "scene": .object(["type": .string("string"),
+                                      "description": .string("可选：地点是生图场景库里的场景时填它的名字。")]),
+                    "outfit": .object(["type": .string("string"),
+                                       "description": .string("可选：换了衣服就填衣柜（生图服饰库）里那套的名字。")]),
+                    "outfit_note": .object(["type": .string("string"),
+                                            "description": .string("可选：衣柜里没有的穿着，或在那套基础上的变化（加了件外套之类）。")]),
                     "reason": .object(["type": .string("string"),
                                        "description": .string("为什么改主意（例如「朋友约我吃火锅」）。")]),
-                    "outfit": .object(["type": .string("string"),
-                                       "description": .string("这段穿什么（一件衣服的名字）。换了衣服时填。")]),
-                    "outfitNote": .object(["type": .string("string"),
-                                           "description": .string("穿搭细节补充（如「外面套了件米色开衫」），没换就不填。")]),
                 ]),
                 "required": .array([.string("start"), .string("end"),
                                     .string("activity"), .string("reason")]),
@@ -93,7 +97,10 @@ struct ScheduleAdjustTool: AgentTool {
         let location = args["location"] as? String
         let detail = args["detail"] as? String
         let outfit = args["outfit"] as? String
-        let outfitNote = args["outfitNote"] as? String
+        // 桌面端字段名是 outfit_note；iOS 旧参数名 outfitNote 也认
+        let outfitNote = (args["outfit_note"] as? String) ?? (args["outfitNote"] as? String)
+        let scene = args["scene"] as? String
+        let situation = args["situation"] as? String
 
         guard start.contains(":"), end.contains(":"), !activity.isEmpty else {
             return "{\"error\": \"start/end/activity 必填（时间格式 HH:MM）\"}"
@@ -101,17 +108,26 @@ struct ScheduleAdjustTool: AgentTool {
         guard ["today", "tomorrow"].contains(dayName), let dateKey = await ScheduleStore.dayKey(for: dayName) else {
             return "{\"error\": \"day 只能是 today / tomorrow\"}"
         }
-        guard await store.adjust(dateKey: dateKey, start: start, end: end,
-                                 activity: activity, note: reason,
-                                 location: location?.isEmpty == true ? nil : location,
-                                 detail: detail, outfit: outfit, outfitNote: outfitNote) else {
-            return "{\"error\": \"时间范围无效：结束时间必须晚于开始时间，且不能超过 24:00\"}"
+        let result = await store.adjust(dateKey: dateKey, start: start, end: end,
+                                        activity: activity, note: reason,
+                                        location: location?.isEmpty == true ? nil : location,
+                                        detail: detail?.isEmpty == true ? nil : detail,
+                                        outfit: outfit?.isEmpty == true ? nil : outfit,
+                                        outfitNote: outfitNote?.isEmpty == true ? nil : outfitNote,
+                                        scene: scene?.isEmpty == true ? nil : scene,
+                                        situation: situation?.isEmpty == true ? nil : situation)
+        switch result {
+        case .noSchedule:
+            // 桌面端 index.js:88：没有这一天的日程就直接拒绝，不凭空造一天
+            return "这一天还没有日程，没法调整。"
+        case .invalid(let message):
+            return "{\"error\": \"\(message)\"}"
+        case .ok:
+            break
         }
-        // 返回给模型的确认话术（提醒它用"自己的口吻"回用户）
-        var note = "记下了：\(start)–\(end) \(activity)"
-        if let location, !location.isEmpty { note += "（在\(location)）" }
-        note += "（原因：\(reason)）。回复里用自己的口吻说决定，别提到工具或「日程」。"
-        if let detail, !detail.isEmpty { note += " 状态细节：\(detail)。" }
-        return note
+        // 返回给模型的确认话术（提醒它用"自己的口吻"回用户）+ 调整后的全天
+        let note = "\(start)–\(end) 改成「\(activity)」：\(reason)"
+        let dayText = await store.dayText(for: dateKey)
+        return "已记下：\(note)\n回复里直接说她的决定和感受就好，别提「日程」「计划」「调整」。\n\n\(dayText)"
     }
 }

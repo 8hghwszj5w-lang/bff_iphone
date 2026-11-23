@@ -10,6 +10,10 @@ import UniformTypeIdentifiers
 // 查不到/为空时如实返回"没搜到"，工具描述里也写明这是"标题级别"的检索。
 // 写入备忘录同样没有公开 API——想做"存到备忘录"要走分享面板，需要用户
 // 手动确认，不属于工具能力范围（不做假装成功的假实现）。
+//
+// 超时：CSSearchQuery 在设备锁屏/索引异常时可能永远不回调 completionHandler。
+// 这里用 OnceGate 保证续体只 resume 一次：正常完成、失败、3 秒超时三者先到先得，
+// 超时返回已收集到的部分结果（通常为空），不再永久挂起。
 
 final class SpotlightNotesBridge {   // 无共享 UI 状态，不需要主 actor
     // nonisolated(unsafe)：工具结构体在非隔离上下文构造；实例方法都在主 actor 上
@@ -38,67 +42,77 @@ final class SpotlightNotesBridge {   // 无共享 UI 状态，不需要主 actor
             queryString += " AND (titleDN CONTAINER[cd] \"\(escaped)\" OR contentDescription CONTAINER[cd] \"\(escaped)\")"
         }
 
-        let box = ResultBox()
-        let csQuery = CSSearchQuery(
-            queryString: queryString,
-            attributes: ["title", "contentDescription", "lastUsedDate"])
+        let box = ResultBox(limit: min(max(limit, 0), 20))
+        let gate = OnceGate()
+        // iOS 16 起 attributes: 版初始化器废弃，改用 queryContext（旧版等价于
+        // fetchAttributes = 那几个字段）。queryContext 可空，这里显式带上要取的属性。
+        let queryContext = CSSearchQueryContext()
+        queryContext.fetchAttributes = ["title", "contentDescription", "lastUsedDate"]
+        let csQuery = CSSearchQuery(queryString: queryString, queryContext: queryContext)
 
-        csQuery.foundItemsHandler = { items in
-            for item in items.prefix(limit) {
-                let title = item.attributeSet.title ?? ""
-                let snippet = item.attributeSet.contentDescription ?? ""
-                if title.isEmpty && snippet.isEmpty { continue }
-                box.append(NoteHit(id: item.uniqueIdentifier,
-                                   title: title.isEmpty ? "(无标题)" : title,
-                                   snippet: snippet,
-                                   lastUsed: item.attributeSet.lastUsedDate))
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<[NoteHit], Error>) in
+            let finish: (Result<[NoteHit], Error>) -> Void = { result in
+                guard gate.claim() else { return }
+                csQuery.cancel()
+                continuation.resume(with: result)
             }
-        }
-
-        return try await withCheckedThrowingContinuation { cont in
-            var finished = false
+            csQuery.foundItemsHandler = { items in
+                box.append(items)
+            }
             csQuery.completionHandler = { error in
-                guard !finished else { return }
-                finished = true
                 if let error {
-                    cont.resume(throwing: QueryError(message: "Spotlight 查询失败：\(error.localizedDescription)"))
+                    finish(.failure(QueryError(message: "Spotlight 查询失败：\(error.localizedDescription)")))
                 } else {
-                    cont.resume(returning: box.snapshot())
+                    finish(.success(box.snapshot()))
                 }
             }
-            box.installDrainTimer { finished = true }   // 超时兜底（见 ResultBox）
+            // 3 秒兜底：不依赖 run loop（工具可能在任意执行器上跑），超时就返回部分结果
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 3) {
+                finish(.success(box.snapshot()))
+            }
             csQuery.start()
         }
     }
 
-    /// 跨回调收集结果的线程安全小盒子；带 3 秒超时兜底
+    /// 跨回调收集结果的线程安全小盒子（去重 + 条数上限）
     private final class ResultBox: @unchecked Sendable {
         private let lock = NSLock()
+        private let limit: Int
         private var hits: [NoteHit] = []
-        private var drainTimer: Timer?
+        private var seen: Set<String> = []
 
-        func append(_ hit: NoteHit) {
-            lock.lock(); hits.append(hit); lock.unlock()
+        init(limit: Int) { self.limit = max(0, limit) }
+
+        func append(_ items: [CSSearchableItem]) {
+            lock.lock(); defer { lock.unlock() }
+            for item in items where hits.count < limit {
+                if seen.contains(item.uniqueIdentifier) { continue }
+                let title = item.attributeSet.title ?? ""
+                let snippet = item.attributeSet.contentDescription ?? ""
+                if title.isEmpty && snippet.isEmpty { continue }
+                seen.insert(item.uniqueIdentifier)
+                hits.append(NoteHit(id: item.uniqueIdentifier,
+                                    title: title.isEmpty ? "(无标题)" : title,
+                                    snippet: snippet,
+                                    lastUsed: item.attributeSet.lastUsedDate))
+            }
         }
 
         func snapshot() -> [NoteHit] {
             lock.lock(); defer { lock.unlock() }
-            drainTimer?.invalidate()
-            drainTimer = nil
             return hits
         }
+    }
 
-        func installDrainTimer(_ onTimeout: @escaping () -> Void) {
-            lock.lock()
-            let timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: false) { _ in
-                self.lock.lock()
-                let shouldFinish = self.hits.isEmpty
-                self.lock.unlock()
-                if shouldFinish { onTimeout() }
-            }
-            RunLoop.main.add(timer, forMode: .default)
-            drainTimer = timer
-            lock.unlock()
+    /// 续体只 resume 一次：完成/失败/超时三条路径先到先得
+    private final class OnceGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var claimed = false
+        func claim() -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            if claimed { return false }
+            claimed = true
+            return true
         }
     }
 }

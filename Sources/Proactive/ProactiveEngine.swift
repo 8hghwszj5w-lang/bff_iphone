@@ -19,9 +19,10 @@ protocol NotificationPosting: AnyObject {
     func removeAllFollowupPreviews() async
 }
 
-/// 真机通知通道（class：满足 AnyObject 协议约束）。category 带 allowAnnouncement：
-/// 用户开启「设置 → Siri → 播报通知」且连着 AirPods 等设备时，Siri 会念出通知正文
-/// （App 侧只负责把资格声明到位）。
+/// 真机通知通道（class：满足 AnyObject 协议约束）。
+/// 注：曾声明 `.allowAnnouncement` 让 Siri 播报通知正文，该选项自 iOS 15 起被系统
+/// 忽略（已废弃），播报与否完全由用户在「设置 → Siri → 播报通知」里决定，
+/// App 侧无需也无法声明，故 category 不再带任何 option。
 final class SystemNotificationPoster: NotificationPosting {
     private let center = UNUserNotificationCenter.current()
 
@@ -32,7 +33,7 @@ final class SystemNotificationPoster: NotificationPosting {
     static func registerCategory() {
         let category = UNNotificationCategory(identifier: categoryID,
                                               actions: [], intentIdentifiers: [],
-                                              options: [.allowAnnouncement])
+                                              options: [])
         UNUserNotificationCenter.current().setNotificationCategories([category])
     }
 

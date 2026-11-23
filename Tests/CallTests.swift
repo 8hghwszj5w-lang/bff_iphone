@@ -1,5 +1,6 @@
 import XCTest
 import Foundation
+import AVFoundation
 @testable import FenShen
 
 // 这些测试覆盖了什么：
@@ -401,7 +402,8 @@ final class CallTests: XCTestCase {
         session.emitFinal("你好")
         await waitPhase(.speaking, of: vm, message: "首句开始合成时应进入 speaking")
 
-        // 基线是用户说完那句话的长度（"你好" = 2 字），partial 比基线长 2+ 字
+        // 句段级 partial（SpeechTranscriber 每句段重发 volatile 文本）：
+        // speaking 期间出现非空 partial 即视为用户又开口 → 打断
         session.emitPartial("你好我想插句话")
 
         // interruptNow 全程同步：partial 回调返回时已完成 interrupted → listening
@@ -470,6 +472,27 @@ final class CallTests: XCTestCase {
         await waitUntil("完成一轮") { vm.lastMetrics != nil }
         XCTAssertEqual(local.spoken, ["答复。"])
         XCTAssertEqual(vm.lastMetrics?.userText, "第一句")
+        vm.shutdown()
+    }
+
+    /// 连续多轮：第一轮正常结束后，第二句（SpeechTranscriber 的下一段 final）
+    /// 必须能开新一轮——旧实现按累计文本做前缀差分，第二段比累计值短会被丢掉，
+    /// 表现为「多轮对话不可用」。这里锁死 VM 侧的多轮生命周期。
+    @MainActor
+    func testConsecutiveTurnsKeepConversationAlive() async throws {
+        let session = MockSpeechSession()
+        let local = MockLocalTTS()
+        let vm = makeVM(llm: MockLLMClient(script: ["答复。"]), localTTS: local, cloudTTS: nil,
+                        player: MockPlayer(), speechSession: session, route: .local)
+        vm.startCall()
+        await waitPhase(.listening, of: vm, message: "启动")
+        session.emitFinal("第一句")
+        await waitUntil("第一轮完成") { vm.lastMetrics?.userText == "第一句" }
+        await waitPhase(.listening, of: vm, message: "第一轮结束应回到收音")
+        session.emitFinal("第二句话")
+        await waitUntil("第二轮完成") { vm.lastMetrics?.userText == "第二句话" }
+        XCTAssertEqual(vm.phase, .listening)
+        XCTAssertEqual(local.spoken, ["答复。", "答复。"], "两轮都应正常合成")
         vm.shutdown()
     }
 
@@ -611,5 +634,399 @@ final class CallTests: XCTestCase {
                        "Keychain 更新后应读到最新值")
         store.remove(account: account)
         XCTAssertNil(store.string(account: account), "Keychain 删除后应读不到")
+    }
+}
+
+// MARK: - SentenceSplitter 增量扫描等价性（性能优化不改变切句行为）
+//
+// 优化后只扫描新到字符。用旧算法（全量重扫）做参照，对各种分片粒度逐一对比，
+// 证明包括「末尾点号立即切句」「小数点不切」等边界行为完全一致。
+private struct ReferenceSentenceSplitter {
+    private var buffer = ""
+    private let terminators: Set<Character> = ["。", "！", "？", "；", "…", "\n", "!", "?", ";"]
+
+    mutating func feed(_ delta: String) -> [String] {
+        buffer += delta
+        let chars = Array(buffer)
+        var sentences: [String] = []
+        var sentenceStart = 0
+        for i in 0..<chars.count {
+            let ch = chars[i]
+            let isSentenceEnd = terminators.contains(ch)
+                || (ch == "." && !(i > 0 && chars[i - 1].isNumber
+                                   && i + 1 < chars.count && chars[i + 1].isNumber))
+            if isSentenceEnd {
+                let sentence = String(chars[sentenceStart...i])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !sentence.isEmpty { sentences.append(sentence) }
+                sentenceStart = i + 1
+            }
+        }
+        buffer = sentenceStart < chars.count ? String(chars[sentenceStart...]) : ""
+        return sentences
+    }
+
+    mutating func flush() -> String? {
+        let tail = buffer.trimmingCharacters(in: .whitespacesAndNewlines)
+        buffer = ""
+        return tail.isEmpty ? nil : tail
+    }
+}
+
+final class SentenceSplitterEquivalenceTests: XCTestCase {
+    func testIncrementalScanMatchesReferenceAcrossChunkSizes() {
+        let corpus = [
+            "你好。3.14是多少？OK! 2.5x3.2=8.0 done.\n再见…",
+            "没有标点的一整段很长很长的中文内容看看会不会切出句子来",
+            "。。。！？；…\n\n!!!???;;;",
+            "价格是3.14元，版本2.0.1发布了。结尾是点号.",
+            "   。  \n  你好  。  ",
+            "混合English.中文。数字123.456结束!尾巴",
+            "",
+            "。",
+            "a.b.c.d",
+        ]
+        for text in corpus {
+            for chunkSize in [1, 2, 3, 5, 7, 64] {
+                var actual = SentenceSplitter()
+                var reference = ReferenceSentenceSplitter()
+                var actualSentences: [String] = []
+                var referenceSentences: [String] = []
+                var index = text.startIndex
+                while index < text.endIndex {
+                    let end = text.index(index, offsetBy: chunkSize, limitedBy: text.endIndex) ?? text.endIndex
+                    let piece = String(text[index..<end])
+                    actualSentences += actual.feed(piece)
+                    referenceSentences += reference.feed(piece)
+                    index = end
+                }
+                XCTAssertEqual(actualSentences, referenceSentences,
+                               "分片粒度 \(chunkSize) 下切句结果必须与旧算法一致：\(text.debugDescription)")
+                XCTAssertEqual(actual.flush(), reference.flush(),
+                               "分片粒度 \(chunkSize) 下 flush 尾巴必须一致：\(text.debugDescription)")
+            }
+            // 整段一次喂入也要一致
+            var whole = SentenceSplitter()
+            var wholeRef = ReferenceSentenceSplitter()
+            XCTAssertEqual(whole.feed(text), wholeRef.feed(text))
+            XCTAssertEqual(whole.flush(), wholeRef.flush())
+        }
+    }
+}
+
+// MARK: - DeepSeek TTS 流式（delegate 分块直出）离线测试
+//
+// 全部走 URLProtocol 桩，不调真实接口。重点验证：
+// ① 奇数字节分片的 16bit 采样对齐（错位半字节 = 播放全是噪声）
+// ② 首包阈值（1024）与后续批量（4096）
+// ③ Content-Length 断流视为失败（文档要求）
+// ④ HTTP 错误码透传
+
+/// TTS 离线桩：按预设分片序列投递响应体（可配 Content-Length 制造断流）。
+/// chunkDelay > 0 时在后台线程逐片异步投递——同步连投会被 URLSession 合并成
+/// 一次 didReceive data，测不出「分片到达即处理」的真实行为。
+final class TTSStubProtocol: URLProtocol {
+    struct StubResponse {
+        var status: Int = 200
+        var chunks: [Data] = []
+        var contentLength: Int64?
+        var chunkDelay: TimeInterval = 0
+    }
+    static var stub: StubResponse?
+
+    private let stateLock = NSLock()
+    private var stopped = false
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let stub = Self.stub, let url = request.url else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+            return
+        }
+        var headers = ["Content-Type": "application/octet-stream"]
+        if let length = stub.contentLength { headers["Content-Length"] = String(length) }
+        let response = HTTPURLResponse(url: url, statusCode: stub.status,
+                                       httpVersion: "HTTP/1.1", headerFields: headers)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        if stub.chunkDelay > 0 {
+            let chunks = stub.chunks
+            let delay = stub.chunkDelay
+            Thread.detachNewThread { [self] in
+                for chunk in chunks {
+                    if self.isStopped { return }
+                    self.client?.urlProtocol(self, didLoad: chunk)
+                    Thread.sleep(forTimeInterval: delay)
+                }
+                if !self.isStopped { self.client?.urlProtocolDidFinishLoading(self) }
+            }
+        } else {
+            for chunk in stub.chunks {
+                client?.urlProtocol(self, didLoad: chunk)
+            }
+            client?.urlProtocolDidFinishLoading(self)
+        }
+    }
+
+    private var isStopped: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return stopped
+    }
+
+    override func stopLoading() {
+        stateLock.lock()
+        stopped = true
+        stateLock.unlock()
+    }
+}
+
+final class DeepSeekTTSStreamingTests: XCTestCase {
+    private var engine: DeepSeekTTSStreamingEngine!
+
+    override func setUp() {
+        super.setUp()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [TTSStubProtocol.self]
+        engine = DeepSeekTTSStreamingEngine(config: .init(
+            apiKey: "sk-test",
+            ttsURL: URL(string: "https://stub.local/v1/tools/tts")!,
+            session: URLSession(configuration: configuration)))
+    }
+
+    override func tearDown() {
+        TTSStubProtocol.stub = nil
+        engine = nil
+        super.tearDown()
+    }
+
+    private func collect() async throws -> (Data, [Int]) {
+        var received = Data()
+        var sizes: [Int] = []
+        for try await chunk in engine.synthesize(text: "你好") {
+            received.append(chunk.pcm)
+            sizes.append(chunk.pcm.count)
+        }
+        return (received, sizes)
+    }
+
+    func testOddChunkSplitsAreSampleAligned() async throws {
+        // 6000 字节音频，故意用奇数分片逐片异步投递（网络常态），验证半字节拼接不错位。
+        // 分片 [1,3,5,7,1023,2049,2912]：前 5 片累计 1039 字节，对齐后进位 1038 ≥ 1024
+        // → 首包应为 1038 字节（而不是等全部 6000 攒齐）；其余按 4096 阈值批量。
+        let original = Data((0..<6000).map { UInt8($0 % 251) })
+        var chunks: [Data] = []
+        var offset = 0
+        for size in [1, 3, 5, 7, 1023, 2049] {
+            chunks.append(original.subdata(in: offset..<(offset + size)))
+            offset += size
+        }
+        chunks.append(original.subdata(in: offset..<original.count))
+        TTSStubProtocol.stub = .init(chunks: chunks, contentLength: Int64(original.count),
+                                     chunkDelay: 0.02)
+
+        let (received, sizes) = try await collect()
+        XCTAssertEqual(received, original, "奇数分片必须按 16bit 采样对齐重组，字节序不能错位")
+        XCTAssertTrue(sizes.allSatisfy { $0 % 2 == 0 }, "每个分片都应是完整采样（偶数字节）")
+        XCTAssertEqual(sizes.first, 1038, "首包应在跨过 1024 阈值的那一片到达时立即产出")
+        XCTAssertLessThan(sizes.first ?? .max, original.count, "首包不应等到全部音频攒齐")
+    }
+
+    func testSmallResponseYieldsRemainderOnFinish() async throws {
+        let original = Data(repeating: 0x7F, count: 500)   // 不足首包阈值
+        TTSStubProtocol.stub = .init(chunks: [original], contentLength: 500)
+        let (received, sizes) = try await collect()
+        XCTAssertEqual(received, original)
+        XCTAssertEqual(sizes, [500], "不足阈值的音频应在流结束时整体交出")
+    }
+
+    func testTruncatedStreamFails() async throws {
+        // Content-Length 声称 10000 字节，实际只投 4000 → 必须报错而不是静默成功
+        let partial = Data(repeating: 0x01, count: 4000)
+        TTSStubProtocol.stub = .init(chunks: [partial], contentLength: 10_000)
+        do {
+            _ = try await collect()
+            XCTFail("断流必须视为失败（文档要求），不能静默结束")
+        } catch {
+            // URLProtocol 桩下可能由 URLSession 先报网络错误，也可能是本端 -2 校验；
+            // 两者都满足「断流 = 失败」的契约。若是本端错误则校验错误码。
+            let ns = error as NSError
+            if ns.domain == "DeepSeekTTS" {
+                XCTAssertEqual(ns.code, -2, "本端断流校验应使用错误码 -2")
+            }
+        }
+    }
+
+    func testHTTPErrorIsPropagated() async throws {
+        TTSStubProtocol.stub = .init(status: 429, chunks: [], contentLength: 0)
+        do {
+            _ = try await collect()
+            XCTFail("HTTP 429 必须抛错")
+        } catch {
+            let ns = error as NSError
+            XCTAssertEqual(ns.domain, "DeepSeekTTS")
+            XCTAssertEqual(ns.code, 429, "HTTP 状态码应透传为错误码（供降级/冷却逻辑使用）")
+        }
+    }
+
+    func testSequentialRequestsReuseEngine() async throws {
+        // 同一引擎连续两句（通话常态）：连接池复用，状态表不串流
+        let first = Data(repeating: 0x11, count: 2048)
+        TTSStubProtocol.stub = .init(chunks: [first], contentLength: Int64(first.count))
+        let (r1, _) = try await collect()
+        XCTAssertEqual(r1, first)
+
+        let second = Data(repeating: 0x22, count: 8192)
+        TTSStubProtocol.stub = .init(chunks: [second], contentLength: Int64(second.count))
+        let (r2, sizes2) = try await collect()
+        XCTAssertEqual(r2, second, "第二句不能混入第一句的残留字节")
+        XCTAssertTrue(sizes2.allSatisfy { $0 % 2 == 0 })
+    }
+}
+
+// MARK: - 播放图格式约束（真实引擎验证）
+//
+// 两个在模拟器上已验证的硬约束：
+// ① AVAudioPlayerNode 不做位深/采样率转换——调度 buffer 必须与节点连接格式一致，
+//    否则 int16 字节被按 float32 解释（离线渲染测试抓到 10^38 级垃圾值 = 真机杂音）；
+// ② mixer 输入总线不接受 int16（连接时 kAudioUnitErr_FormatNotSupported -10868）。
+// 因此生产实现：play() 把 int16 PCM 转 float32，节点按 float32@24kHz 连接，
+// 采样率转换由 mixer 完成。本测试验证该配置下真实引擎能播完 0.2s 音频。
+final class StreamingAudioGraphFormatTests: XCTestCase {
+    func testPlayerNodePlaysFloat32_24kBufferOnMatchingGraph() throws {
+        let session = AVAudioSession.sharedInstance()
+        try session.setCategory(.playback)
+        try session.setActive(true)
+        defer { try? session.setActive(false) }
+
+        let engine = AVAudioEngine()
+        let player = AVAudioPlayerNode()
+        engine.attach(player)
+        let graphFormat = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 24_000, channels: 1))
+        engine.connect(player, to: engine.mainMixerNode, format: graphFormat)
+
+        let frames: AVAudioFrameCount = 4_800   // 0.2s @ 24kHz
+        let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: graphFormat, frameCapacity: frames))
+        buffer.frameLength = frames
+        for i in 0..<Int(frames) {
+            let phase = 2.0 * Double.pi * 440.0 * Double(i) / 24_000.0
+            buffer.floatChannelData?[0][i] = Float(0.12 * sin(phase))
+        }
+
+        engine.prepare()
+        try engine.start()
+        defer { player.stop(); engine.stop() }
+
+        let played = expectation(description: "float32 @24kHz buffer 应在匹配图上播完")
+        player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { _ in
+            played.fulfill()
+        }
+        player.play()
+        wait(for: [played], timeout: 5)
+    }
+}
+
+// MARK: - 播放管线样本级验证（离线渲染 + int16→float32 转换）
+//
+// 「云端测试音频播放杂音」的回归：真实图（AVAudioPlayerNode → mixer → 48kHz
+// 输出）离线渲染 0.5s 440Hz 正弦，抓输出样本验证是幅度/频率正确的正弦而不是
+// 噪声；另有 play() 的 int16→float32 转换单元测试。改动图格式或数据转换方式
+// 时这里会直接失败。
+
+final class PlaybackGraphRenderingTests: XCTestCase {
+    func testFloat32_24kSineRendersCleanlyOn48kOutput() throws {
+        let engine = AVAudioEngine()
+        let player = AVAudioPlayerNode()
+        engine.attach(player)
+        let graphFormat = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 24_000, channels: 1))
+        engine.connect(player, to: engine.mainMixerNode, format: graphFormat)
+        let renderFormat = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1))
+        try engine.enableManualRenderingMode(.offline, format: renderFormat, maximumFrameCount: 4096)
+
+        let inputFrames: AVAudioFrameCount = 12_000
+        let input = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: graphFormat, frameCapacity: inputFrames))
+        input.frameLength = inputFrames
+        for i in 0..<Int(inputFrames) {
+            let phase = 2.0 * Double.pi * 440.0 * Double(i) / 24_000.0
+            input.floatChannelData?[0][i] = Float(0.488 * sin(phase))
+        }
+
+        try engine.start()
+        player.scheduleBuffer(input, completionCallbackType: .dataPlayedBack, completionHandler: nil)
+        player.play()
+
+        let renderBuffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: renderFormat, frameCapacity: 4096))
+        var samples: [Float] = []
+        var remaining = 26_400
+        while remaining > 0 {
+            let frames = min(4096, remaining)
+            let status = try engine.renderOffline(AVAudioFrameCount(frames), to: renderBuffer)
+            XCTAssertEqual(status, .success)
+            guard let data = renderBuffer.floatChannelData?[0] else { break }
+            samples.append(contentsOf: (0..<Int(renderBuffer.frameLength)).map { data[$0] })
+            remaining -= Int(renderBuffer.frameLength)
+        }
+        try engine.stop()
+
+        XCTAssertGreaterThan(samples.count, 24_000)
+        let analysis = Array(samples[2_400..<24_000])
+        let peak = analysis.map { abs($0) }.max() ?? 0
+        XCTAssertGreaterThan(peak, 0.3, "输出必须有信号（输入幅度≈0.49），不能是静音")
+        XCTAssertLessThan(peak, 0.9, "输出不应失真削波")
+        var crossings = 0
+        for i in 1..<analysis.count where analysis[i - 1] <= 0 && analysis[i] > 0 {
+            crossings += 1
+        }
+        XCTAssertTrue((180...220).contains(crossings),
+                      "输出应为 440Hz 正弦（零交叉≈198），实际 \(crossings) —— 超出范围说明转换出错（杂音）")
+    }
+}
+
+// MARK: - play() 的 int16 → float32 转换（不创建真实引擎）
+
+/// 捕获调度 buffer 的桩：验证 play() 把 24k/int16 PCM 正确转成 float32 入队。
+private final class CapturingAudioOutput: StreamingAudioOutput, @unchecked Sendable {
+    private let lock = NSLock()
+    private var buffers: [AVAudioPCMBuffer] = []
+
+    var captured: [AVAudioPCMBuffer] {
+        lock.lock(); defer { lock.unlock() }
+        return buffers
+    }
+
+    func schedule(_ buffer: AVAudioPCMBuffer,
+                  completion: @escaping @Sendable () async -> Void) throws {
+        lock.lock(); buffers.append(buffer); lock.unlock()
+        Task { await completion() }
+    }
+
+    func stop() {}
+    func shutdown() {}
+}
+
+final class PlaybackPCMConversionTests: XCTestCase {
+    func testPlayConvertsInt16ToFloat32At24k() async throws {
+        let output = CapturingAudioOutput()
+        let player = StreamingAudioPlayer(output: output)
+        // 4 个采样：0, 16384, -16384, 32767（小端 int16）
+        let samples: [Int16] = [0, 16_384, -16_384, 32_767]
+        var data = Data()
+        for s in samples {
+            data.append(contentsOf: withUnsafeBytes(of: s.littleEndian) { Array($0) })
+        }
+
+        try await player.play(pcm: data)
+        let buffer = try XCTUnwrap(output.captured.first)
+        XCTAssertEqual(buffer.format.commonFormat, .pcmFormatFloat32,
+                       "入队 buffer 必须是 float32（int16 会被播放节点/混音器误解释）")
+        XCTAssertEqual(buffer.format.sampleRate, 24_000)
+        XCTAssertEqual(buffer.frameLength, 4)
+        let converted = (0..<4).map { buffer.floatChannelData?[0][$0] ?? .nan }
+        XCTAssertEqual(converted[0], 0, accuracy: 0.0005)
+        XCTAssertEqual(converted[1], 0.5, accuracy: 0.0005)
+        XCTAssertEqual(converted[2], -0.5, accuracy: 0.0005)
+        XCTAssertEqual(converted[3], 0.99997, accuracy: 0.0005)
+        await player.stopAll()
     }
 }

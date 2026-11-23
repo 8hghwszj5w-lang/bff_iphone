@@ -81,7 +81,7 @@ struct ImageCropView: View {
                 )
                 .onAppear { updateFrame(frame) }
                 // 比例切换也会改变裁剪框，不能只监听外部容器尺寸。
-                .onChange(of: frame) { updateFrame($0) }
+                .onChange(of: frame) { _, newFrame in updateFrame(newFrame) }
             }
             .padding(.horizontal, 16)
 
@@ -90,7 +90,7 @@ struct ImageCropView: View {
             }
             .pickerStyle(.segmented)
             .padding(.horizontal, 16)
-            .onChange(of: aspect) { _ in reset() }
+            .onChange(of: aspect) { reset() }
 
             HStack {
                 Button("取消", action: onCancel)

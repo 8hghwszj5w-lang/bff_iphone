@@ -8,8 +8,9 @@ import Foundation
 // 让 CallViewModel 用 for await 消费，取消 Task 即取消网络流。
 
 struct PipelineLLMClient: LLMClient {
-    /// Pipeline 是 MainActor 隔离的，持有引用即可（调用点也在 MainActor 上下文）
-    nonisolated(unsafe) private unowned let pipeline: Pipeline
+    /// Pipeline 是 MainActor 隔离的，持有引用即可（调用点也在 MainActor 上下文）。
+    /// Pipeline 已是 Sendable 类型，`unowned let` 常量无需 nonisolated(unsafe) 逃逸检查。
+    private unowned let pipeline: Pipeline
 
     init(pipeline: Pipeline) {
         self.pipeline = pipeline

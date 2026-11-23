@@ -51,7 +51,9 @@ final class ImageStudioStore: ObservableObject {
     /// 一次聊天里最多记这么多条生成，防止缓冲无限涨
     private static let generatedLogLimit = 40
 
-    private static let imageExtensions = ["png", "jpg", "jpeg", "webp", "gif"]
+    /// nonisolated：非隔离的目录扫描（scanCategory / scanFolderEntry）与
+    /// 工具层都要读它；纯字符串数组常量，没有 actor 状态可竞争。
+    nonisolated private static let imageExtensions = ["png", "jpg", "jpeg", "webp", "gif"]
 
     // MARK: - 初始化
 
@@ -107,16 +109,27 @@ final class ImageStudioStore: ObservableObject {
     // MARK: - 配置持久化
 
     private static func loadConfig(at url: URL) -> StudioConfig {
+        // 缺字段回默认、越界夹住（对应 store.js normalizeConfig）：
+        // 先把默认配置摊成 JSON 当底，把文件里的字段叠上去再解码，这样手改 / 旧版 config.json 也能读。
+        let fallback = StudioConfig()
         guard let data = try? Data(contentsOf: url),
-              let decoded = try? JSONDecoder().decode(StudioConfig.self, from: data) else {
-            return StudioConfig()
+              let patch = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let defaultData = try? JSONEncoder().encode(fallback),
+              let base = (try? JSONSerialization.jsonObject(with: defaultData)) as? [String: Any] else {
+            return fallback
         }
-        return decoded
+        let merged = StudioJSON.merge(base: base, patch: patch)
+        guard let mergedData = try? JSONSerialization.data(withJSONObject: merged),
+              let decoded = try? JSONDecoder().decode(StudioConfig.self, from: mergedData) else {
+            return fallback
+        }
+        return decoded.normalized()
     }
 
     private func saveConfig() {
         let url = rootDirectory.appendingPathComponent("config.json")
-        if let data = try? JSONEncoder().encode(config) {
+        // 落盘的是归一化后的值：手改的越界配置在这里被夹回来
+        if let data = try? StudioJSON.prettyEncoder().encode(config.normalized()) {
             try? data.write(to: url, options: .atomic)
         }
     }
@@ -124,21 +137,25 @@ final class ImageStudioStore: ObservableObject {
     // MARK: - 关键词持久化
 
     private static func loadPresets(at url: URL) -> StudioPresets {
-        // 不存在时写入默认值；坏文件不覆盖，退回默认值继续工作（对应 presets.js loadPresets）
-        if let data = try? Data(contentsOf: url),
-           let decoded = try? JSONDecoder().decode(StudioPresets.self, from: data) {
-            return StudioPresets.normalize(decoded)
+        // 文件不存在 = 第一次运行：写入默认值
+        guard let data = try? Data(contentsOf: url) else {
+            let defaults = StudioDefaultPresets.presets
+            if let data = try? StudioJSON.prettyEncoder().encode(defaults) {
+                try? data.write(to: url, options: .atomic)
+            }
+            return defaults
         }
-        let defaults = StudioDefaultPresets.presets
-        if let data = try? JSONEncoder().encode(defaults) {
-            try? data.write(to: url, options: .atomic)
+        // 坏 JSON / 结构不对：只在内存里退回默认值继续工作，绝不覆盖用户文件
+        //（对应 presets.js loadPresets：手改坏一个字段不该把全部自定义关键词写没）
+        guard let decoded = try? JSONDecoder().decode(StudioPresets.self, from: data) else {
+            return StudioDefaultPresets.presets
         }
-        return defaults
+        return StudioPresets.normalize(decoded)
     }
 
     private func savePresets() {
         let url = rootDirectory.appendingPathComponent("presets.json")
-        if let data = try? JSONEncoder().encode(presets) {
+        if let data = try? StudioJSON.prettyEncoder().encode(presets) {
             try? data.write(to: url, options: .atomic)
         }
     }
@@ -149,16 +166,38 @@ final class ImageStudioStore: ObservableObject {
 
     // MARK: - 生成记录持久化（history.jsonl，一行一条）
 
+    /// 一条「空记录」的 JSON 形状：读历史时当底，补上老记录缺的字段
+    /// （桌面端 running 行没有 size / files / ms，直接解码会整行失败）。
+    private static func defaultRecordObject() -> [String: Any] {
+        let blank = ImageRecord(id: "", at: Date(timeIntervalSince1970: 0), source: "", status: "",
+                                prompt: "", caption: "", finalPrompt: "", aspect: "", refs: [],
+                                keywords: [:], notes: [], unresolved: [], model: "")
+        guard let data = try? StudioJSON.encoder().encode(blank),
+              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return [:] }
+        return obj
+    }
+
     private static func loadHistory(at url: URL) -> [ImageRecord] {
         guard let raw = try? String(contentsOf: url, encoding: .utf8) else { return [] }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        var records: [ImageRecord] = []
+        let decoder = StudioJSON.decoder()
+        let base = defaultRecordObject()
+        // 与桌面端 readHistory 一致：同 id 的多行按「后写的覆盖先写的」合并（状态更新就是追加写一行）
+        var merged: [String: [String: Any]] = [:]
+        var order: [String] = []
         for line in raw.split(separator: "\n") {
-            if let data = line.data(using: .utf8),
-               let record = try? decoder.decode(ImageRecord.self, from: data) {
-                records.append(record)
-            }
+            guard let data = line.data(using: .utf8),
+                  let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  let id = obj["id"] as? String, !id.isEmpty else { continue }
+            if merged[id] == nil { order.append(id) }
+            merged[id] = (merged[id] ?? [:]).merging(obj) { _, new in new }
+        }
+        var records: [ImageRecord] = []
+        for id in order {
+            guard var obj = merged[id] else { continue }
+            for (key, value) in base where obj[key] == nil { obj[key] = value }
+            guard let data = try? JSONSerialization.data(withJSONObject: obj),
+                  let record = try? decoder.decode(ImageRecord.self, from: data) else { continue }
+            records.append(record)
         }
         // 超限裁掉最老的一半并重写文件（对应桌面端 compactHistory）
         if records.count > historyLimit {
@@ -169,8 +208,7 @@ final class ImageStudioStore: ObservableObject {
     }
 
     private static func writeHistoryLines(_ records: [ImageRecord], to url: URL) {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
+        let encoder = StudioJSON.encoder()
         var text = ""
         for record in records {
             if let data = try? encoder.encode(record), let line = String(data: data, encoding: .utf8) {
@@ -180,11 +218,18 @@ final class ImageStudioStore: ObservableObject {
         try? text.write(to: url, atomically: true, encoding: .utf8)
     }
 
+    /// 追加 / 更新一条记录（对应桌面端 appendHistory + readHistory 的按 id 合并语义）。
+    /// 同一个 id 再次落盘时整个文件重写为「一行一个 id」，避免内存里一条、磁盘上两行，
+    /// 也避免 UI 里一直挂着一条永远「进行中」的重复记录。
     private func appendHistory(_ record: ImageRecord) {
-        history.append(record)
         let url = rootDirectory.appendingPathComponent("history.jsonl")
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
+        if let index = history.lastIndex(where: { $0.id == record.id }) {
+            history[index] = record
+            Self.writeHistoryLines(history, to: url)
+            return
+        }
+        history.append(record)
+        let encoder = StudioJSON.encoder()
         if let data = try? encoder.encode(record), let line = String(data: data, encoding: .utf8) {
             if let handle = try? FileHandle(forWritingTo: url) {
                 defer { try? handle.close() }
@@ -221,7 +266,7 @@ final class ImageStudioStore: ObservableObject {
         var deleted = record
         deleted.status = "deleted"
         deleted.files = []
-        history[index] = deleted
+        // upsert：同 id 就地替换（原来这里是「先替换再 append」，内存里会多出一条重复记录）
         appendHistory(deleted)
     }
 
@@ -259,8 +304,10 @@ final class ImageStudioStore: ObservableObject {
 
     nonisolated private static func scanFolderEntry(category: StudioCategory, id: String, dir: URL) -> LibraryEntry {
         var meta = LibraryEntryMeta()
+        // entry.json 用兼容解码器：桌面端 createdAt / updatedAt 是带毫秒的 ISO 字符串，
+        // 用默认 JSONDecoder 会整条解码失败，名字 / 描述 / 默认服饰 / 情境穿搭全丢。
         if let data = try? Data(contentsOf: dir.appendingPathComponent("entry.json")),
-           let decoded = try? JSONDecoder().decode(LibraryEntryMeta.self, from: data) {
+           let decoded = try? StudioJSON.decoder().decode(LibraryEntryMeta.self, from: data) {
             meta = decoded
         }
         let files = ((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? [])
@@ -327,9 +374,8 @@ final class ImageStudioStore: ObservableObject {
                                     traits: traits, defaultOutfit: defaultOutfit,
                                     situationOutfits: nil, cover: cover,
                                     createdAt: now, updatedAt: now)
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        // entry.json 与桌面端同构：日期写成 ISO 带毫秒（桌面端读它只做 JSON.parse，不挑格式）
+        let encoder = StudioJSON.prettyEncoder()
         if let data = try? encoder.encode(meta) {
             try? data.write(to: dir.appendingPathComponent("entry.json"), options: .atomic)
         }
@@ -354,9 +400,8 @@ final class ImageStudioStore: ObservableObject {
         }
         mutate(&meta)
         meta.updatedAt = Date()
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        // entry.json 与桌面端同构：日期写成 ISO 带毫秒（桌面端读它只做 JSON.parse，不挑格式）
+        let encoder = StudioJSON.prettyEncoder()
         if let data = try? encoder.encode(meta) {
             try? data.write(to: dir.appendingPathComponent("entry.json"), options: .atomic)
         }
@@ -390,7 +435,85 @@ final class ImageStudioStore: ObservableObject {
         }
         return StudioScheduleContext(characterName: schedule.characterName,
                                      start: item.start, end: item.end, activity: item.activity,
-                                     outfit: item.outfit ?? "", outfitNote: item.outfitNote ?? "")
+                                     outfit: item.outfit ?? "", outfitNote: item.outfitNote ?? "",
+                                     scene: item.scene ?? "", situation: item.situation ?? "")
+    }
+
+    // MARK: - 素材库快照（给日程模块做穿搭 / 场景 / 道具 / 人物联动）
+
+    /// 把参考库 + 情境关键词打包成日程模块能直接用的快照（对应桌面端 daily-schedule 的 wardrobe.js
+    /// loadWardrobe / herEntry / otherPeople；那边直接读生图插件的 library/ 与 presets.json）。
+    ///
+    /// 她 = config.compose.imageCharacter（id / 名字 / 别名精确或唯一匹配）
+    ///      > 日程角色名 > 人物库里唯一的人物。
+    /// 库是空的（没有人物 / 服饰 / 场景 / 道具 / 情境）时返回 nil，日程模块按「无素材库」降级。
+    func scheduleWardrobe() -> ScheduleWardrobe? {
+        let characters = library[.characters] ?? []
+        let outfits = library[.outfits] ?? []
+        let scenes = library[.scenes] ?? []
+        let props = library[.props] ?? []
+        let situations = presets.situation
+        guard !characters.isEmpty || !outfits.isEmpty || !scenes.isEmpty
+                || !props.isEmpty || !situations.isEmpty else { return nil }
+
+        let her = scheduleHerEntry(characters)
+        var wardrobe = ScheduleWardrobe()
+        wardrobe.herName = her?.name ?? ""
+        wardrobe.herDefaultOutfit = her?.defaultOutfit ?? ""
+        wardrobe.herSituationOutfits = her?.situationOutfits ?? [:]
+        wardrobe.outfits = outfits.map(Self.wardrobeItem)
+        wardrobe.scenes = scenes.map(Self.wardrobeItem)
+        wardrobe.props = props.map(Self.wardrobeItem)
+        wardrobe.people = otherPeople(her, characters: characters).map(Self.wardrobeItem)
+        wardrobe.situations = situations.compactMap { item in
+            let name = item.name.trimmingCharacters(in: .whitespaces)
+            guard !name.isEmpty else { return nil }
+            return ScheduleWardrobeSituation(
+                name: name,
+                aliases: item.aliases,
+                scene: item.scene ?? "",
+                outfit: item.outfit ?? "")
+        }
+        // 联动开关：日程模块自己有配置，这里只报告素材可用（与桌面端一致，生图插件关掉也能读库）
+        wardrobe.outfitsOn = true
+        wardrobe.scenesOn = true
+        wardrobe.propsOn = true
+        wardrobe.peopleOn = true
+        return wardrobe
+    }
+
+    /// 素材库里「她」是哪个人物条目（对应 wardrobe.js herEntry）
+    private func scheduleHerEntry(_ characters: [LibraryEntry]) -> LibraryEntry? {
+        let configured = config.compose.imageCharacter.trimmingCharacters(in: .whitespaces)
+        if !configured.isEmpty,
+           let hit = ImageStudioComposer.resolveRef(.characters, configured, library: library) {
+            return hit
+        }
+        if let name = schedule?.characterName, !name.isEmpty,
+           let hit = ImageStudioComposer.resolveRef(.characters, name, library: library) {
+            return hit
+        }
+        return characters.count == 1 ? characters.first : nil
+    }
+
+    /// 人物库里除她（以及她的变体，如「Q版小鱼」）以外的人（对应 wardrobe.js otherPeople）
+    private func otherPeople(_ her: LibraryEntry?, characters: [LibraryEntry]) -> [LibraryEntry] {
+        let herNames = ([(schedule?.characterName ?? ""), her?.name ?? ""] + (her?.aliases ?? []))
+            .map(StudioPresets.norm)
+            .filter { $0.count >= 2 }
+        return characters.filter { entry in
+            if let her, entry.id == her.id { return false }
+            let names = ([entry.name] + entry.aliases).map(StudioPresets.norm)
+            return !names.contains { name in herNames.contains { name.contains($0) } }
+        }
+    }
+
+    private static func wardrobeItem(_ entry: LibraryEntry) -> ScheduleWardrobeItem {
+        ScheduleWardrobeItem(name: entry.name,
+                             aliases: entry.aliases,
+                             tags: entry.tags,
+                             descriptionText: entry.descriptionText,
+                             defaultOutfit: entry.defaultOutfit)
     }
 
     // MARK: - 生成（对应 engine.js runGeneration）
@@ -414,9 +537,10 @@ final class ImageStudioStore: ObservableObject {
         if source == "tool", !args.userRequested, config.policy.cooldownMin > 0, let last = lastShotAt {
             let gapMin = Date().timeIntervalSince(last) / 60
             if gapMin < Double(config.policy.cooldownMin) {
-                throw StudioError(message: String(
-                    format: "主动发图冷却中：距离上一张才 %.1f 分钟（设定至少 %d 分钟）。这次先不发；如果用户明确要图，带上 user_requested: true 再调用。",
-                    gapMin, config.policy.cooldownMin))
+                // 冷却不是错误（对应桌面端 { ok: false, message }）：工具层把它当普通文本返回
+                let gapText = String(format: "%.1f", gapMin)
+                throw StudioCooldownMessage(message:
+                    "主动发图冷却中：距离上一张才 \(gapText) 分钟（设定至少 \(config.policy.cooldownMin) 分钟）。这次先不发；如果用户明确要图，带上 user_requested: true 再调用。")
             }
         }
         let prompt = args.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -425,35 +549,31 @@ final class ImageStudioStore: ObservableObject {
         }
 
         let scheduleCtx = scheduleContext()
-        let extraCount = args.extraImages.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }.count
+        // extra_images：先在这里解析（查生成历史 / 读本机文件），
+        // 编号、预算与提示词里的「图N：…」行交给 compose，与桌面端一致
+        let extras = args.extraImages
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .map { StudioExtraInput(raw: $0, ref: resolveExtra($0)) }
         var plan = ImageStudioComposer.compose(args, config: config, library: library, presets: presets,
-                                               schedule: scheduleCtx, extraCount: extraCount)
+                                               schedule: scheduleCtx, extras: extras)
 
-        // extra_images：历史 id → 本地文件，插到参考图最前面
-        var extraRefs: [StudioRef] = []
-        for raw in args.extraImages {
-            let s = raw.trimmingCharacters(in: .whitespaces)
-            guard !s.isEmpty else { continue }
-            if let h = findHistory(s), let rel = h.files.first,
-               FileManager.default.fileExists(atPath: outputURL(rel).path) {
-                extraRefs.append(StudioRef(kind: "extra", label: "上一张生成图（\(s)）",
-                                           category: nil, entryId: nil, name: nil, file: nil,
-                                           url: outputURL(rel)))
-            } else {
-                plan.unresolved.append("参考图「\(s)」")
-            }
-        }
         // compose 只填了条目信息，文件路径在这里按库目录补上（发给 API 的参考图）
-        let entryRefs = plan.refs.map { ref -> StudioRef in
+        var resolvedRefs: [StudioRef] = []
+        for ref in plan.refs {
+            if ref.kind == "extra" {
+                if ref.url != nil { resolvedRefs.append(ref) }
+                continue
+            }
             var r = ref
             if r.url == nil, let category = r.category, let entryId = r.entryId, let file = r.file,
                let entry = library[category]?.first(where: { $0.id == entryId }) {
                 let url = entryImageURL(entry, file: file)
                 if FileManager.default.fileExists(atPath: url.path) { r.url = url }
             }
-            return r
+            if r.url != nil { resolvedRefs.append(r) }
         }
-        plan.refs = extraRefs + entryRefs.filter { $0.url != nil }
+        plan.refs = resolvedRefs
 
         let id = Self.newId("img-")
         let started = Date()
@@ -497,9 +617,33 @@ final class ImageStudioStore: ObservableObject {
             record.error = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             record.ms = Int(Date().timeIntervalSince(started) * 1000)
             appendHistory(record)
-            lastShotAt = Date()
             throw error
         }
+    }
+
+    /// 解析 extra_images 的一条引用（对应 compose.js resolveExtra）：
+    /// 先当生成记录 id（img-…）查历史里的第一张结果图，再当本机图片绝对路径。
+    /// 解析不了返回 nil（只进 unresolved，不占参考图张数预算）。
+    func resolveExtra(_ raw: String) -> StudioRef? {
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty else { return nil }
+        if let h = findHistory(s), let rel = h.files.first {
+            let url = outputURL(rel)
+            if FileManager.default.fileExists(atPath: url.path) {
+                return StudioRef(kind: "extra", label: "上一张生成图（\(s)）",
+                                 category: nil, entryId: nil, name: nil, file: nil, url: url)
+            }
+        }
+        // 本机图片绝对路径（桌面端 compose.js:47-49 同款规则：文件存在 + 扩展名是图片）
+        if s.hasPrefix("/"), FileManager.default.fileExists(atPath: s) {
+            let ext = (s as NSString).pathExtension.lowercased()
+            if Self.imageExtensions.contains(ext) {
+                return StudioRef(kind: "extra", label: "图片 \((s as NSString).lastPathComponent)",
+                                 category: nil, entryId: nil, name: nil, file: nil,
+                                 url: URL(fileURLWithPath: s))
+            }
+        }
+        return nil
     }
 
     /// 存结果图，返回相对 outputs/ 的路径（对应 engine.js saveOutputs）

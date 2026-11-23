@@ -72,7 +72,10 @@ struct PhoneView: View {
             vm?.shutdown()
         }
         .sheet(isPresented: $showComparison) {
-            CallComparisonView(apiKey: app.settings.apiKey, baseURL: app.settings.baseURL)
+            // 通话页打开对比页：复用通话的播放器（与麦克风同一引擎），
+            // 避免独立引擎与 voice-processing 引擎抢会话 IO（无声/杂音）。
+            CallComparisonView(apiKey: app.settings.apiKey, baseURL: app.settings.baseURL,
+                               sharedPlayer: vm?.player)
         }
     }
 }
@@ -223,10 +226,10 @@ struct CallStageView: View {
                 .padding()
             }
             .frame(maxHeight: 300)
-            .onChange(of: vm.liveTranscript) { _ in
+            .onChange(of: vm.liveTranscript) {
                 proxy.scrollTo("live", anchor: .bottom)
             }
-            .onChange(of: vm.replyText) { _ in
+            .onChange(of: vm.replyText) {
                 proxy.scrollTo("live", anchor: .bottom)
             }
         }

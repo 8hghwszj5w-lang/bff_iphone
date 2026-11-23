@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 
 // MARK: - 通话五大组件的协议抽象
@@ -47,17 +48,24 @@ protocol SpeechSession: AnyObject {
     /// 结束时触发，参数是可直接展示给用户的说明。VM 主动 stop() 不触发。
     /// （不触发就会产生「界面显示通话中、麦克风已死」的僵尸通话）
     var onInvalidated: (@MainActor (String) -> Void)? { get set }
+    /// 通话期间可复用的音频引擎：TTS 播放节点接入同一引擎。
+    /// 双引擎（播放器自建 + 麦克风引擎）在 voice-processing 会话里会争抢 IO：
+    /// 合成音听不到、播放完成回调不触发（awaitDrained 卡死 → 多轮对话不可用）、
+    /// 引擎反复启停爆音。单引擎还让系统回声消除把 TTS 外放正确计入参考信号。
+    var sharedAudioEngine: AVAudioEngine? { get }
     func start() async throws
     func stop() async
 }
 
 extension SpeechSession {
-    /// 默认空实现：单元测试的 Mock 不关心环境事件。
-    /// 生产实现（Modern/Legacy）用存储属性覆盖。
+    /// 默认空实现：单元测试的 Mock / 不关心的实现无需暴露引擎。
     var onInvalidated: (@MainActor (String) -> Void)? {
         get { nil }
         set {}
     }
+
+    /// 默认不暴露引擎（自建播放引擎的实现照旧）。
+    var sharedAudioEngine: AVAudioEngine? { nil }
 }
 
 enum STTEvent {

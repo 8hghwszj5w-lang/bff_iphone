@@ -4,9 +4,10 @@ import Foundation
 //
 // 流程（与桌面插件一致）：
 //   1. 按星期从启用的日程类型里加权随机挑一种（上班日/休息日/外出日/宅家日/加班日/摸鱼日）
-//   2. 拼 prompt：人设 + 类型框架 + 最近三天摘要（去重提醒）+ 特别要求 + JSON 输出格式
-//   3. 调模型拿 JSON → 解析 → normalizeItems（<4 条视为失败）
-//   4. 失败 → 类型模板兜底（朴素但完整的一天），并记录错误
+//   2. 拼 prompt：人设 + 类型框架 + 最近三天摘要（去重提醒）+ 特别要求 + JSON 输出格式；
+//      装了生图工作室时附上衣柜 / 常去的地方 / 物品 / 认识的人 / 情境关键词（dress.js wardrobePrompt）
+//   3. 调模型拿 JSON → 解析 → normalizeItems（<4 条视为失败）→ linkItems 校验补全穿搭（fill=true）
+//   4. 失败 → 类型模板兜底（朴素但完整的一天，同样过一遍 linkItems），并记录错误
 // runner 语义：
 //   · 今天没有日程（刚装/昨晚关着）→ 打开 App 立刻补上
 //   · 到了生成时刻（默认 22:00）明天还没有 → 生成明天的
@@ -118,7 +119,13 @@ enum ScheduleGenerator {
         ])
     }
 
-    /// 最近三天摘要（generate.js recentSummary：排除睡觉，列活动即可）
+    /// 保持原顺序去重（桌面端 [...new Set(...)]）
+    private static func uniqueOrdered(_ values: [String]) -> [String] {
+        var seen = Set<String>()
+        return values.filter { seen.insert($0).inserted }
+    }
+
+    /// 最近三天摘要（generate.js recentSummary：排除睡觉，列出活动 / 穿过的整套 / 去过的场景）
     private static func recentSummary(store: ScheduleStore, for dateKey: String, days: Int = 3) -> String {
         var lines: [String] = []
         for offset in stride(from: days, through: 1, by: -1) {
@@ -127,41 +134,64 @@ enum ScheduleGenerator {
                   let day = store.loadDay(dateKey: ScheduleStore.dateKey(for: date)) else { continue }
             let main = day.items.filter { !$0.isSleep }.prefix(8)
                 .map(\.activity).joined(separator: "、")
-            let places = Array(Set(day.items.compactMap(\.location)).prefix(5)).joined(separator: "、")
+            let worn = uniqueOrdered(day.items.compactMap(\.outfit).filter { !$0.isEmpty }).joined(separator: "、")
+            let places = uniqueOrdered(day.items.compactMap(\.scene).filter { !$0.isEmpty }).joined(separator: "、")
             var line = "- \(ScheduleStore.dateLabel(for: date))（\(day.dayTypeName ?? "")）：\(day.title ?? "")"
             if !main.isEmpty { line += "。做了：\(main)" }
+            if !worn.isEmpty { line += "。穿过：\(worn)" }
             if !places.isEmpty { line += "。去过：\(places)" }
             lines.append(line)
         }
         return lines.joined(separator: "\n")
     }
 
-    /// 拼 prompt（generate.js buildPrompt 的精简移植：无衣柜/生图联动）
-    static func buildPrompt(characterName: String, persona: String, partnerName: String,
+    /// 拼 prompt（对应 generate.js buildPrompt；装了生图工作室时附上素材库段落）
+    static func buildPrompt(characterName: String, persona: String, partnerName: String = "",
                             date: Date, type: ScheduleDayType,
-                            recent: String, hint: String) -> String {
+                            recent: String, hint: String,
+                            wardrobe: ScheduleWardrobe? = nil, extraRules: String = "") -> String {
         let dateLabel = ScheduleStore.dateLabel(for: date)
-        let example = #"{"title": "一句话概括这一天", "mood": "这一天整体的心情", "items": [{"start": "00:00", "end": "07:30", "activity": "睡觉", "location": "家", "detail": ""}]}"#
-        var lines = [
+        let wardrobeInfo = ScheduleWardrobeLink.wardrobePrompt(wardrobe)
+        let situations = (wardrobe?.available == true) ? (wardrobe?.situations.map(\.name) ?? []) : []
+
+        // JSON 示例：睡觉那一段 + 素材库字段（桌面端 generate.js:92）
+        var example: [String: Any] = [
+            "start": "00:00", "end": "07:30", "activity": "睡觉",
+            "location": "家", "detail": "",
+        ]
+        for (key, value) in wardrobeInfo.example { example[key] = value }
+        if !situations.isEmpty { example["situation"] = "睡前" }
+
+        var lines: [String] = [
             "你在为角色「\(characterName)」安排 \(dateLabel) 这一整天的日程。这份日程会作为 \(characterName) 当天的生活背景，聊天时 \(characterName) 会按它知道自己此刻在做什么。",
             persona.isEmpty ? "" : "【人设】\n\(persona)",
             partnerName.isEmpty ? "" : "【用户】\(characterName) 称呼用户为「\(partnerName)」。",
-            "【这一天的类型】\(type.name)：\(type.guide)",
-            recent.isEmpty ? "" : "【最近几天】\n\(recent)\n这一天的安排和小插曲不要和最近几天重复。",
+            "【这一天的类型】\(type.name)：\(type.guide.isEmpty ? "按这个类型合理安排。" : type.guide)",
+            recent.isEmpty ? "" : "【最近几天】\n\(recent)\n这一天的安排、小插曲和穿搭不要和最近几天重复。",
+            wardrobeInfo.sections,
+            extraRules.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? "" : "【固定设定】\(extraRules.trimmingCharacters(in: .whitespacesAndNewlines))",
             hint.isEmpty ? "" : "【这一天的特别要求（优先满足）】\(hint)",
             "【要求】",
             "- 从 00:00 排到 24:00，时间连续、不重叠，24 小时制 HH:MM，最后一段的 end 写 24:00；一般 12–20 段。",
             "- 每段：activity 写在做什么（具体，10 字以内，例如「挤地铁去公司」「在茶水间偷吃饼干」）；location 写在哪；detail 写一两句当时的状态或小插曲（心情、吃了什么、碰到什么事、和谁在一起），让这一天有活人感。",
             "- 符合人设的性格和习惯，但别夸张成闹剧；睡觉时间合理。",
-            "只输出一个 JSON 对象，不要任何其他文字或代码块标记：",
-            example,
+            situations.isEmpty ? "" : "- situation：从这些情境里挑最贴近的一个（\(situations.joined(separator: "、"))），都不贴近就留空。",
         ]
-        lines = lines.filter { !$0.isEmpty }
-        return lines.joined(separator: "\n")
+        lines.append(contentsOf: wardrobeInfo.rules)
+        lines.append("只输出一个 JSON 对象，不要任何其他文字或代码块标记：")
+        lines.append(Self.jsonString(example))
+        return lines.filter { !$0.isEmpty }.joined(separator: "\n")
+    }
+
+    private static func jsonString(_ object: [String: Any]) -> String {
+        guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]),
+              let text = String(data: data, encoding: .utf8) else { return "{}" }
+        return text
     }
 
     /// 解析模型输出（generate.js parseSchedule 移植：剥代码块围栏、取首尾大括号、
-    /// normalize 后不足 4 条视为失败）
+    /// normalize 后不足 4 条视为失败；scene / situation / outfit / outfitNote / props / with 一并解析）
     static func parseSchedule(_ text: String) throws -> (title: String, mood: String, items: [ScheduleItem]) {
         var s = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if s.hasPrefix("```") { s = String(s.dropFirst(3)) }
@@ -175,22 +205,42 @@ enum ScheduleGenerator {
             throw NSError(domain: "ScheduleGen", code: 2,
                           userInfo: [NSLocalizedDescriptionKey: "日程 JSON 解析失败"])
         }
-        let rawItems = (obj["items"] as? [[String: Any]] ?? []).compactMap { raw -> ScheduleItem? in
-            guard let start = raw["start"] as? String,
-                  let end = raw["end"] as? String,
-                  let activity = raw["activity"] as? String else { return nil }
-            return ScheduleItem(start: start, end: end, activity: activity,
-                                location: raw["location"] as? String,
-                                detail: raw["detail"] as? String)
-        }
+        let rawItems = (obj["items"] as? [[String: Any]] ?? []).compactMap(Self.item(from:))
         let items = ScheduleNormalizer.normalize(rawItems)
         guard items.count >= 4 else {
             throw NSError(domain: "ScheduleGen", code: 3,
                           userInfo: [NSLocalizedDescriptionKey: "模型给的日程太短了"])
         }
-        let title = (obj["title"] as? String ?? "").trimmingCharacters(in: .whitespaces)
-        let mood = (obj["mood"] as? String ?? "").trimmingCharacters(in: .whitespaces)
-        return (String(title.prefix(80)), String(mood.prefix(40)), items)
+        let title = ScheduleItem.oneLine(obj["title"] as? String, 80)
+        let mood = ScheduleItem.oneLine(obj["mood"] as? String, 40)
+        return (title, mood, items)
+    }
+
+    /// 模型 JSON 的一段 → ScheduleItem（兼容 outfit_note 等桌面端字段名）
+    private static func item(from raw: [String: Any]) -> ScheduleItem? {
+        guard let start = raw["start"] as? String,
+              let end = raw["end"] as? String,
+              let activity = raw["activity"] as? String else { return nil }
+        func string(_ keys: [String]) -> String? {
+            for key in keys {
+                if let value = raw[key] as? String,
+                   !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return value }
+            }
+            return nil
+        }
+        func list(_ keys: [String]) -> [String]? {
+            for key in keys {
+                if let values = raw[key] as? [String] { return values }
+                if let value = raw[key] as? String, !value.isEmpty { return [value] }
+            }
+            return nil
+        }
+        return ScheduleItem(start: start, end: end, activity: activity,
+                            location: string(["location"]), detail: string(["detail"]),
+                            outfit: string(["outfit"]),
+                            outfitNote: string(["outfitNote", "outfit_note"]),
+                            scene: string(["scene"]), situation: string(["situation"]),
+                            props: list(["props"]), with: list(["with"]))
     }
 
     /// 生成并保存某一天的日程。永不抛错：失败时用类型模板兜底并记录错误。
@@ -199,18 +249,23 @@ enum ScheduleGenerator {
     ///   - dayTypeId: 指定类型（UI「按要求重新生成」用）；nil = 加权随机
     ///   - hint: 这一天的特别要求（如「下午和你去看电影」）
     ///   - fallback: false 时不兜底、直接抛错（供诊断与 autoFill 冷却）
+    ///   - wardrobe: 生图工作室素材库快照（nil = 按无素材库降级，只按文字生成）
+    ///   - partnerName / extraRules: 对应桌面端 cfg.partnerName / cfg.extraRules（【用户】【固定设定】段落）
     static func generateDay(dateKey: String, persona: String, characterName: String,
                             client ask: @Sendable (String) async throws -> String,
                             store: ScheduleStore, dayTypeId: String? = nil,
-                            hint: String? = nil, fallback: Bool = true) async throws -> DaySchedule {
+                            hint: String? = nil, fallback: Bool = true,
+                            wardrobe: ScheduleWardrobe? = nil,
+                            partnerName: String = "", extraRules: String = "") async throws -> DaySchedule {
         let date = dateKey.toDate() ?? Date()
         // 指定类型强制生效（UI 下拉框）；nil 才走加权随机
         let type = dayTypeId.flatMap { id in ScheduleDayType.defaults.first { $0.id == id } }
             ?? pickDayType(for: date)
         let prompt = buildPrompt(characterName: characterName, persona: String(persona.prefix(3500)),
-                                 partnerName: "", date: date, type: type,
+                                 partnerName: partnerName, date: date, type: type,
                                  recent: recentSummary(store: store, for: dateKey),
-                                 hint: (hint ?? "").trimmingCharacters(in: .whitespaces))
+                                 hint: (hint ?? "").trimmingCharacters(in: .whitespaces),
+                                 wardrobe: wardrobe, extraRules: extraRules)
         var day = DaySchedule(date: dateKey, dayTypeName: type.name)
         day.generatedAt = Date()
         do {
@@ -218,14 +273,15 @@ enum ScheduleGenerator {
             let parsed = try parseSchedule(text)
             day.title = parsed.title
             day.mood = parsed.mood
-            day.items = parsed.items
+            // 生成后按素材库校验名字并补全穿搭 / 场景（桌面端 generate.js:163 linkItems(..., {fill:true})）
+            day.items = ScheduleWardrobeLink.linkItems(parsed.items, wardrobe: wardrobe, fill: true)
             day.source = "llm"
         } catch is CancellationError {
             throw CancellationError()
         } catch {
             guard fallback else { throw error }
             day.title = type.name
-            day.items = templateItems(type: type)
+            day.items = ScheduleWardrobeLink.linkItems(templateItems(type: type), wardrobe: wardrobe, fill: true)
             day.source = "template"
             day.generationError = "\(error.localizedDescription)"
         }
@@ -237,8 +293,10 @@ enum ScheduleGenerator {
 
     /// 1）今天没有日程 → 立刻补上；2）到了生成时刻明天还没有 → 生成明天的。
     /// 失败 20 分钟内不重试同一日期。返回实际生成的日期 key 列表。
+    /// - Parameter wardrobe: 生图工作室素材库快照（Lead 在 AppState 里接 wardrobeProvider）
     @discardableResult
     static func autoFill(store: ScheduleStore, persona: String, characterName: String,
+                         wardrobe: ScheduleWardrobe? = nil,
                          ask: @escaping @Sendable (String) async throws -> String,
                          now: Date = Date()) async -> [String] {
         var generated: [String] = []
@@ -247,10 +305,10 @@ enum ScheduleGenerator {
 
         // 1. 今天没有（刚装 / 昨晚没生成）→ 马上补；补完继续走下面的明天分支
         if store.loadDay(dateKey: todayKey) == nil {
-            let day: DaySchedule
             do {
-                day = try await generateDay(dateKey: todayKey, persona: persona,
-                                            characterName: characterName, client: ask, store: store)
+                _ = try await generateDay(dateKey: todayKey, persona: persona,
+                                          characterName: characterName, client: ask, store: store,
+                                          wardrobe: wardrobe)
                 retryAfter.removeValue(forKey: todayKey)
                 generated.append(todayKey)
             } catch {
@@ -259,7 +317,6 @@ enum ScheduleGenerator {
                 retryAfter[tomorrowKey] = now.addingTimeInterval(retryCooldownSeconds)
                 return generated
             }
-            _ = day
         }
 
         // 2. 到了生成时刻且明天还没有 → 生成明天的
@@ -272,7 +329,8 @@ enum ScheduleGenerator {
         do {
             _ = try await generateDay(dateKey: tomorrowKey, persona: persona,
                                       characterName: characterName, client: ask, store: store,
-                                      fallback: false)   // 显式失败 → 进冷却，不拿模板占坑
+                                      fallback: false,   // 显式失败 → 进冷却，不拿模板占坑
+                                      wardrobe: wardrobe)
             generated.append(tomorrowKey)
             retryAfter.removeValue(forKey: tomorrowKey)
         } catch {

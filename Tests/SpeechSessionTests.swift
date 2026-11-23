@@ -259,3 +259,154 @@ private final class MainActorAtomicFlag {
     func clear() { storage = false }
     var value: Bool { storage }
 }
+
+// MARK: - tap 缓冲区规整器（闪退修复的离线验证）
+//
+// 真机断言「Audio sample data must be 16-bit signed integers」（Speech 二进制
+// 中已确认）：AnalyzerInput 只收 int16，麦克风原生 float32 必须转换。
+// 规整器：int16 直通、float32/int32 → int16、空帧/非法格式丢弃。
+// 全部用离线构造的 AVAudioPCMBuffer，不创建引擎、不碰麦克风。
+final class TapBufferConditionerTests: XCTestCase {
+    private func makeBuffer(_ format: AVAudioFormat, frames: AVAudioFrameCount,
+                            capacity: AVAudioFrameCount? = nil) throws -> AVAudioPCMBuffer {
+        let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format,
+                                                    frameCapacity: capacity ?? frames))
+        buffer.frameLength = frames
+        return buffer
+    }
+
+    private func floatFormat(rate: Double = 48_000, channels: AVAudioChannelCount = 1) throws -> AVAudioFormat {
+        try XCTUnwrap(AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: rate,
+                                    channels: channels, interleaved: false))
+    }
+
+    func testInt16PassesThroughUnchanged() throws {
+        let conditioner = TapBufferConditioner()
+        let int16Format = try XCTUnwrap(AVAudioFormat(commonFormat: .pcmFormatInt16,
+                                                      sampleRate: 48_000, channels: 1, interleaved: true))
+        let buffer = try makeBuffer(int16Format, frames: 1024)
+        buffer.int16ChannelData?[0][0] = 12345
+        let out = try XCTUnwrap(conditioner.conditioned(buffer))
+        XCTAssertTrue(out === buffer, "int16 正是 AnalyzerInput 要的格式，应原样直通")
+        XCTAssertEqual(out.int16ChannelData?[0][0], 12345)
+    }
+
+    func testEmptyBufferIsDropped() throws {
+        let conditioner = TapBufferConditioner()
+        // 格式重协商瞬间 tap 会产出 0 帧 buffer——AnalyzerInput 对此硬 trap
+        let empty = try makeBuffer(try floatFormat(), frames: 0, capacity: 1024)
+        XCTAssertNil(conditioner.conditioned(empty), "空帧必须丢弃，不能喂给 Speech 框架")
+    }
+
+    func testFloat32IsConvertedToInt16() throws {
+        let conditioner = TapBufferConditioner()
+        // 麦克风常态：48kHz 单声道 float32 → 必须转成 int16 才能喂 AnalyzerInput
+        let buffer = try makeBuffer(try floatFormat(), frames: 4)
+        let samples: [Float] = [0, 0.5, 1.0, -1.0]
+        for (i, s) in samples.enumerated() { buffer.floatChannelData?[0][i] = s }
+
+        let out = try XCTUnwrap(conditioner.conditioned(buffer), "float32 应被转换而不是丢弃（否则麦克风静默死掉）")
+        XCTAssertEqual(out.format.commonFormat, .pcmFormatInt16)
+        XCTAssertEqual(out.format.sampleRate, 48_000, "采样率保持不变，重采样由 SpeechAnalyzer 内部负责")
+        XCTAssertEqual(out.frameLength, 4)
+        XCTAssertEqual(out.int16ChannelData?[0][0], 0)
+        XCTAssertEqual(out.int16ChannelData?[0][1], 16384)
+        XCTAssertEqual(out.int16ChannelData?[0][2], 32767, "满幅 1.0 应削波到 Int16.max")
+        XCTAssertEqual(out.int16ChannelData?[0][3], -32768)
+    }
+
+    func testFloat32DeinterleavedStereoBecomesInterleavedInt16() throws {
+        let conditioner = TapBufferConditioner()
+        let format = try XCTUnwrap(AVAudioFormat(commonFormat: .pcmFormatFloat32,
+                                                 sampleRate: 48_000, channels: 2, interleaved: false))
+        let buffer = try makeBuffer(format, frames: 2)
+        buffer.floatChannelData?[0][0] = 0.5    // 左 0
+        buffer.floatChannelData?[0][1] = 0      // 左 1
+        buffer.floatChannelData?[1][0] = -0.5   // 右 0
+        buffer.floatChannelData?[1][1] = 0.25   // 右 1
+
+        let out = try XCTUnwrap(conditioner.conditioned(buffer))
+        XCTAssertEqual(out.format.commonFormat, .pcmFormatInt16)
+        XCTAssertEqual(out.format.channelCount, 2)
+        XCTAssertTrue(out.format.isInterleaved, "输出应为 interleaved int16（标准 PCM 线格式）")
+        XCTAssertEqual(out.int16ChannelData?[0][0], 16384)
+        XCTAssertEqual(out.int16ChannelData?[0][1], -16384)
+        XCTAssertEqual(out.int16ChannelData?[0][2], 0)
+        XCTAssertEqual(out.int16ChannelData?[0][3], 8192)
+    }
+
+    func testInt32InterleavedStereoIsConvertedToInt16() throws {
+        let conditioner = TapBufferConditioner()
+        let format = try XCTUnwrap(AVAudioFormat(commonFormat: .pcmFormatInt32,
+                                                 sampleRate: 48_000, channels: 2, interleaved: true))
+        let buffer = try makeBuffer(format, frames: 2)
+        buffer.int32ChannelData?[0][0] = Int32.max   // 左声道
+        buffer.int32ChannelData?[0][1] = Int32.min   // 右声道
+        buffer.int32ChannelData?[0][2] = 0
+        buffer.int32ChannelData?[0][3] = 1 << 30     // 精确映射到 16384
+
+        let out = try XCTUnwrap(conditioner.conditioned(buffer))
+        XCTAssertEqual(out.format.commonFormat, .pcmFormatInt16)
+        XCTAssertEqual(out.format.channelCount, 2)
+        XCTAssertEqual(out.int16ChannelData?[0][0], 32767)
+        XCTAssertEqual(out.int16ChannelData?[0][1], -32768)
+        XCTAssertEqual(out.int16ChannelData?[0][2], 0)
+        XCTAssertEqual(out.int16ChannelData?[0][3], 16384)
+    }
+
+    func testConverterIsReusedAcrossBuffersAndFormatChange() throws {
+        let conditioner = TapBufferConditioner()
+        // 同一格式连续多片（tap 的常态）：转换器复用，每片都正确规整
+        for i in 0..<5 {
+            let buffer = try makeBuffer(try floatFormat(), frames: 256)
+            buffer.floatChannelData?[0][0] = Float(1000 * (i + 1)) / 32768.0
+            let out = try XCTUnwrap(conditioner.conditioned(buffer))
+            XCTAssertEqual(out.format.commonFormat, .pcmFormatInt16)
+            XCTAssertEqual(out.int16ChannelData?[0][0], Int16(1000 * (i + 1)))
+        }
+        // 路由切换后格式变了（采样率 16kHz）：重建转换器，仍然可用
+        let buffer = try makeBuffer(try floatFormat(rate: 16_000), frames: 128)
+        buffer.floatChannelData?[0][0] = -0.5
+        let out = try XCTUnwrap(conditioner.conditioned(buffer))
+        XCTAssertEqual(out.format.sampleRate, 16_000)
+        XCTAssertEqual(out.int16ChannelData?[0][0], -16384)
+        // int16 直通不受影响
+        let int16Format = try XCTUnwrap(AVAudioFormat(commonFormat: .pcmFormatInt16,
+                                                      sampleRate: 16_000, channels: 1, interleaved: true))
+        let passthrough = try makeBuffer(int16Format, frames: 64)
+        XCTAssertTrue(try XCTUnwrap(conditioner.conditioned(passthrough)) === passthrough)
+    }
+
+    /// 分析器协商格式（zh_CN 为 16kHz int16）：48kHz float32 麦克风音频
+    /// 必须重采样 + 转 int16——直接喂 48kHz 会报
+    /// 「Model not available for LiveTranscription zh_CN 48,000」。
+    func testNegotiatedFormatIsResampledAndConverted() throws {
+        let target = try XCTUnwrap(AVAudioFormat(commonFormat: .pcmFormatInt16,
+                                                 sampleRate: 16_000, channels: 1, interleaved: true))
+        let conditioner = TapBufferConditioner(targetFormat: target)
+        // DC 0.5 便于验证幅度（重采样滤波会平滑首尾，取中段比较）
+        let buffer = try makeBuffer(try floatFormat(rate: 48_000), frames: 3_000)
+        for i in 0..<3_000 { buffer.floatChannelData?[0][i] = 0.5 }
+
+        let out = try XCTUnwrap(conditioner.conditioned(buffer))
+        XCTAssertEqual(out.format.commonFormat, .pcmFormatInt16, "输出必须仍是 int16（AnalyzerInput 硬约束）")
+        XCTAssertEqual(out.format.sampleRate, 16_000, "必须重采样到分析器协商的采样率")
+        XCTAssertEqual(out.format.channelCount, 1)
+        // 3000 帧 @48kHz = 62.5ms → @16kHz ≈ 1000 帧；SRC 有约 6–20 帧内部滤波
+        // 延迟（下一片会补上，连续流总帧数不丢），允许余量。
+        XCTAssertTrue((980...1_005).contains(Int(out.frameLength)),
+                      "重采样后帧数应 ≈ 1000（允许 SRC 滤波延迟余量），实际 \(out.frameLength)")
+        let mid = Int(out.frameLength) / 2
+        let sample = Int(out.int16ChannelData?[0][mid] ?? 0)
+        XCTAssertTrue(abs(sample - 16_384) <= 300, "DC 0.5 重采样后中段应≈16384，实际 \(sample)")
+    }
+
+    /// 输入已经是协商格式（例如引擎侧已转换）：直通零拷贝
+    func testInputAlreadyInNegotiatedFormatPassesThrough() throws {
+        let target = try XCTUnwrap(AVAudioFormat(commonFormat: .pcmFormatInt16,
+                                                 sampleRate: 16_000, channels: 1, interleaved: true))
+        let conditioner = TapBufferConditioner(targetFormat: target)
+        let buffer = try makeBuffer(target, frames: 512)
+        XCTAssertTrue(try XCTUnwrap(conditioner.conditioned(buffer)) === buffer)
+    }
+}

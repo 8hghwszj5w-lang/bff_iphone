@@ -45,7 +45,7 @@ final class LocalAVSpeechTTSEngine: TTSEngine {
         try Task.checkCancellation()
         let id = UUID()
         let utterance = AVSpeechUtterance(string: text)
-        utterance.voice = Self.preferredChineseVoice()
+        utterance.voice = Self.cachedChineseVoice
         // 默认 0.5；通话场景略慢更自然
         utterance.rate = 0.52
         utterance.postUtteranceDelay = 0.15
@@ -100,12 +100,17 @@ final class LocalAVSpeechTTSEngine: TTSEngine {
 
     /// 音色优先级：premium > enhanced > 默认 zh-CN。
     /// enhanced/premium 需要在 设置 → 辅助功能 → 朗读内容 → 声音 里下载过才有。
-    static func preferredChineseVoice() -> AVSpeechSynthesisVoice? {
+    /// nonisolated：speechVoices() 线程安全，且缓存初始化可能发生在任意上下文。
+    nonisolated static func preferredChineseVoice() -> AVSpeechSynthesisVoice? {
         let zh = AVSpeechSynthesisVoice.speechVoices().filter { $0.language.hasPrefix("zh") }
         return zh.first { $0.quality == .premium }
             ?? zh.first { $0.quality == .enhanced }
             ?? AVSpeechSynthesisVoice(language: "zh-CN")
     }
+
+    /// speechVoices() 是全系统音色枚举（真机可达几十毫秒），通话逐句合成不能每句都查。
+    /// 首次用时查一次并缓存；会话中途新下载的音色下次启动生效（可接受的取舍）。
+    private static let cachedChineseVoice: AVSpeechSynthesisVoice? = preferredChineseVoice()
 }
 
 /// 保留 utterance 对象跨主线程投递：旧回调不能被误认作下一句。
@@ -149,6 +154,12 @@ private final class LocalAVSpeechSynthesizer: NSObject, LocalSpeechSynthesizing,
 //   错误：400 无文本或内容审核 / 429 并发超限 / 503 繁忙 / 504 超时
 //   注意：音频中途断流视为失败（文档明确要求），实现里校验 Content-Length
 // 不支持语速调节与断点续传，因此打断 = 直接取消请求。
+//
+// 流式实现：URLSessionDataDelegate 分块直出（TTSStreamHub）。
+// 此前用 AsyncBytes 逐字节 await + 攒满 4096 才 yield：每秒音频 4.8 万次异步
+// 迭代白白烧 CPU，首包还要等 85ms 音频攒够。现在网络分片到达即处理，
+// 首包攒够 1024 字节（≈21ms 音频）就交给播放器，后续按 4096 批量，
+// 端到端首音更快、通话期间 CPU 占用显著更低。
 
 final class DeepSeekTTSStreamingEngine: TTSStreamingEngine, Sendable {
     let name = "DeepSeek TTS"
@@ -157,13 +168,23 @@ final class DeepSeekTTSStreamingEngine: TTSStreamingEngine, Sendable {
         var apiKey: String
         var ttsURL: URL
         var voiceID: String = "stella"      // stella(女声,默认) / tide(男声)
+        /// 提供 URLSessionConfiguration（含测试注入的 URLProtocol 桩）；
+        /// 实际请求走引擎自建的 delegate 会话（见 TTSStreamHub）。
         var session: URLSession = .shared
     }
 
     private let config: Config
+    private let hub: TTSStreamHub
 
     init(config: Config) {
         self.config = config
+        self.hub = TTSStreamHub(configuration: config.session.configuration)
+    }
+
+    deinit {
+        // URLSession 强引用 delegate 直到显式 invalidate；引擎随通话页销毁，
+        // 不主动失效会泄漏会话（每次进通话页新建一个引擎）。
+        hub.close()
     }
 
     /// 便捷构造：从用户配置的 baseURL 推导。
@@ -189,49 +210,20 @@ final class DeepSeekTTSStreamingEngine: TTSStreamingEngine, Sendable {
 
     func synthesize(text: String) -> AsyncThrowingStream<TTSAudioChunk, Error> {
         AsyncThrowingStream { continuation in
-            let task = Task {
-                do {
-                    var req = URLRequest(url: config.ttsURL)
-                    req.httpMethod = "POST"
-                    req.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
-                    req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                    req.timeoutInterval = 120
-                    req.httpBody = try JSONEncoder().encode(TTSRequestBody(
-                        text: text, voiceID: config.voiceID, format: "pcm", filterMarkdown: true))
-
-                    let (bytes, response) = try await config.session.bytes(for: req)
-                    guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-                        let http = response as? HTTPURLResponse
-                        // 错误体是 JSON（也可能不是），尽力解析出 message
-                        throw NSError(domain: "DeepSeekTTS", code: http?.statusCode ?? -1,
-                                      userInfo: [NSLocalizedDescriptionKey:
-                                            "TTS 请求失败（HTTP \(http?.statusCode ?? -1)）"])
-                    }
-
-                    // 文档要求：响应提前结束（字节数不足 Content-Length）视为失败
-                    let expected = http.expectedContentLength   // -1 = 未知（chunked）
-                    var received = 0
-                    var buffer = Data()
-                    var iterator = bytes.makeAsyncIterator()
-                    while let byte = try await iterator.next() {
-                        buffer.append(byte)
-                        received += 1
-                        if buffer.count >= 4096 {
-                            continuation.yield(TTSAudioChunk(pcm: buffer))
-                            buffer = Data()
-                        }
-                    }
-                    if !buffer.isEmpty { continuation.yield(TTSAudioChunk(pcm: buffer)) }
-                    if expected > 0 && received < expected {
-                        throw NSError(domain: "DeepSeekTTS", code: -2,
-                                      userInfo: [NSLocalizedDescriptionKey: "TTS 音频中途断流（文档要求视为失败）"])
-                    }
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
-                }
+            do {
+                var req = URLRequest(url: config.ttsURL)
+                req.httpMethod = "POST"
+                req.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
+                req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                req.timeoutInterval = 120
+                req.httpBody = try JSONEncoder().encode(TTSRequestBody(
+                    text: text, voiceID: config.voiceID, format: "pcm", filterMarkdown: true))
+                let task = hub.start(request: req, continuation: continuation)
+                // 消费者取消（打断/挂断）→ 取消网络请求；didComplete 会清理流状态
+                continuation.onTermination = { _ in task.cancel() }
+            } catch {
+                continuation.finish(throwing: error)
             }
-            continuation.onTermination = { _ in task.cancel() }
         }
     }
 
@@ -247,5 +239,135 @@ final class DeepSeekTTSStreamingEngine: TTSStreamingEngine, Sendable {
             self.format = format
             self.filter_markdown = filterMarkdown
         }
+    }
+}
+
+/// 引擎级共享流式会话：一个 delegate 会话复用整通通话的连接池（句间 TLS 不重握）。
+/// 网络分片在 didReceive data 里直接产出，不做逐字节异步迭代。
+///
+/// 线程模型：delegate 回调在系统串行队列上依次到达；lock 只防 onTermination
+/// （任意线程）与回调竞争 streams 表。continuation 本身线程安全。
+private final class TTSStreamHub: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private struct Stream {
+        let continuation: AsyncThrowingStream<TTSAudioChunk, Error>.Continuation
+        var expected: Int64 = -1        // Content-Length；-1 = chunked 未知
+        var received: Int64 = 0
+        var pending = Data()            // 未到 yield 阈值的累积（恒为偶数字节）
+        var carry: UInt8?               // 奇数分片的半个 16bit 采样，拼进下一片
+        var yieldedFirst = false
+        var httpError: Error?
+    }
+
+    private let lock = NSLock()
+    private var streams: [Int: Stream] = [:]
+    private var session: URLSession!
+
+    /// 首包 1024 字节 ≈ 21ms 音频：够覆盖网络抖动，又比旧 4096（85ms）快得多；
+    /// 后续 4096 批量，减少播放器调度次数。
+    private static let firstThreshold = 1024
+    private static let nextThreshold = 4096
+
+    init(configuration: URLSessionConfiguration) {
+        super.init()
+        // 复制注入配置（保留测试的 URLProtocol 桩）；delegateQueue nil = 系统串行队列
+        session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
+    }
+
+    func start(request: URLRequest,
+               continuation: AsyncThrowingStream<TTSAudioChunk, Error>.Continuation) -> URLSessionDataTask {
+        let task = session.dataTask(with: request)
+        lock.lock()
+        streams[task.taskIdentifier] = Stream(continuation: continuation)
+        lock.unlock()
+        task.resume()
+        return task
+    }
+
+    /// 引擎销毁时调用：让在途任务收尾后释放 delegate，打破 session↔delegate 循环引用。
+    func close() {
+        session.finishTasksAndInvalidate()
+    }
+
+    // MARK: URLSessionDataDelegate
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
+                    didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        var disposition = URLSession.ResponseDisposition.allow
+        lock.lock()
+        if var stream = streams[dataTask.taskIdentifier] {
+            if let http = response as? HTTPURLResponse {
+                stream.expected = http.expectedContentLength
+                if !(200..<300).contains(http.statusCode) {
+                    stream.httpError = NSError(domain: "DeepSeekTTS", code: http.statusCode,
+                                               userInfo: [NSLocalizedDescriptionKey:
+                                                    "TTS 请求失败（HTTP \(http.statusCode)）"])
+                    disposition = .cancel   // 错误体无需下载；didComplete 里抛 HTTP 错误
+                }
+            }
+            streams[dataTask.taskIdentifier] = stream
+        }
+        lock.unlock()
+        completionHandler(disposition)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        lock.lock()
+        guard var stream = streams[dataTask.taskIdentifier], stream.httpError == nil else {
+            lock.unlock()
+            return
+        }
+        stream.received += Int64(data.count)
+        var chunk = data
+        // 16bit 采样对齐：网络分片可能在采样中间切开，半个字节留到下一片拼接，
+        // 否则后续所有采样错位半字节 → 播放出来全是噪声。
+        if let carry = stream.carry {
+            chunk = Data([carry]) + chunk
+            stream.carry = nil
+        }
+        if chunk.count % 2 != 0 {
+            stream.carry = chunk.last
+            chunk = chunk.dropLast()
+        }
+        stream.pending.append(chunk)
+        let threshold = stream.yieldedFirst ? Self.nextThreshold : Self.firstThreshold
+        var out: Data?
+        if stream.pending.count >= threshold {
+            out = stream.pending
+            stream.pending = Data()
+            stream.yieldedFirst = true
+        }
+        streams[dataTask.taskIdentifier] = stream
+        let continuation = stream.continuation
+        lock.unlock()
+        if let out { continuation.yield(TTSAudioChunk(pcm: out)) }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        lock.lock()
+        guard let stream = streams.removeValue(forKey: task.taskIdentifier) else {
+            lock.unlock()
+            return
+        }
+        lock.unlock()
+        if let httpError = stream.httpError {
+            stream.continuation.finish(throwing: httpError)
+            return
+        }
+        if let error {
+            // 消费者已取消时 continuation 已终止，finish 是空操作，不会误报
+            stream.continuation.finish(throwing: error)
+            return
+        }
+        // 文档要求：响应提前结束（字节数不足 Content-Length）视为失败
+        if stream.expected > 0 && stream.received < stream.expected {
+            stream.continuation.finish(throwing: NSError(domain: "DeepSeekTTS", code: -2,
+                userInfo: [NSLocalizedDescriptionKey: "TTS 音频中途断流（文档要求视为失败）"]))
+            return
+        }
+        if !stream.pending.isEmpty {
+            stream.continuation.yield(TTSAudioChunk(pcm: stream.pending))
+        }
+        stream.continuation.finish()
     }
 }

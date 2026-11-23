@@ -8,7 +8,7 @@ import SwiftUI
 
 struct SchedulePageView: View {
     @EnvironmentObject private var app: AppState
-    let store: ScheduleStore
+    @ObservedObject var store: ScheduleStore
 
     @State private var dayOffset = 0                       // 0=今天 1=明天
     @State private var newStart = Date()
@@ -80,6 +80,11 @@ struct SchedulePageView: View {
                 TextField("做什么（必填）", text: $newActivity)
                 TextField("在哪（可选）", text: $newLocation)
                 Button("添加到 \(dateKey)") {
+                    // store.adjust 与桌面端一致：没有这一天的日程就拒绝（不凭空造一天）。
+                    // 这里是用户主动给空的一天加东西，先建一天，再走覆盖逻辑。
+                    if store.loadDay(dateKey: dateKey) == nil {
+                        store.saveDay(DaySchedule(date: dateKey))
+                    }
                     store.adjust(dateKey: dateKey,
                                  start: ScheduleItem.clock(minutes: minutes(newStart)),
                                  end: ScheduleItem.clock(minutes: minutes(newEnd)),
@@ -97,9 +102,12 @@ struct SchedulePageView: View {
             }
 
             Section {
+                Toggle("注入到对话（她此刻的生活背景）", isOn: $store.injectEnabled)
                 Button("查看注入预览") { showInjectionPreview = true }
+            } header: {
+                Text("注入到对话")
             } footer: {
-                Text("注入预览 = 每轮对话真正拼进 system 消息的「生活背景」文本。")
+                Text("桌面端是按会话 /life 开关，iOS 单会话用一个总开关：关掉后每轮对话不再带上她的生活背景（适合干正事），日程本身和工具照常。预览 = 真正拼进 system 消息的文本。")
             }
 
             // 自动生成（对应桌面端 generate.js：加权挑类型 → LLM → JSON → 模板兜底）
@@ -140,11 +148,12 @@ struct SchedulePageView: View {
         .navigationTitle("每日日程")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear(perform: syncDayFields)
-        .onChange(of: dayOffset) { _ in syncDayFields() }
+        .onChange(of: dayOffset) { syncDayFields() }
         .sheet(isPresented: $showInjectionPreview) {
             NavigationStack {
                 ScrollView {
-                    Text(store.injectionText(now: Date()))
+                    let preview = store.injectionText(now: Date())
+                    Text(preview.isEmpty ? "（注入已关闭：关掉「注入到对话」时不会拼进 system 消息）" : preview)
                         .font(.footnote.monospaced())
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding()
@@ -198,22 +207,29 @@ struct SchedulePageView: View {
         let typeID = generateTypeID
         let key = dateKey
         let persona = app.persona.text
+        let wardrobe = store.wardrobeProvider?()   // 素材库快照：生成时给模型看衣柜 / 场景 / 物品 / 认识的人
         let client = DeepSeekClient(settings: app.settings)
+        // 显式 do/catch：此前 Task 的闭包会 throw，错误被 Task 吞掉（编译器 #NoUseUnstructuredThrowingTask），
+        // 一旦生成器在落模板前抛错，generating 永远停在 true，按钮会永久禁用。
         Task {
-            let day = try await ScheduleGenerator.generateDay(
-                dateKey: key, persona: persona, characterName: "小深",
-                client: { prompt in
-                    let (text, _) = try await client.ask(messages: [.user(prompt)],
-                                                         tools: [],
-                                                         toolRunner: { _, _ in "" })
-                    return text
-                },
-                store: store, dayTypeId: typeID, hint: hint)
-            // 失败落了模板时把错误透出给用户看（成功时 source==llm 无错误）
-            if let genError = day.generationError {
-                generationError = "模型生成失败（\(genError)），已用「\(day.dayTypeName ?? "")」模板兜底。"
+            do {
+                let day = try await ScheduleGenerator.generateDay(
+                    dateKey: key, persona: persona, characterName: "小深",
+                    client: { prompt in
+                        let (text, _) = try await client.ask(messages: [.user(prompt)],
+                                                             tools: [],
+                                                             toolRunner: { _, _ in "" })
+                        return text
+                    },
+                    store: store, dayTypeId: typeID, hint: hint, wardrobe: wardrobe)
+                // 失败落了模板时把错误透出给用户看（成功时 source==llm 无错误）
+                if let genError = day.generationError {
+                    generationError = "模型生成失败（\(genError)），已用「\(day.dayTypeName ?? "")」模板兜底。"
+                }
+                syncDayFields()
+            } catch {
+                generationError = "生成失败：\(error.localizedDescription)"
             }
-            syncDayFields()
             generating = false
         }
     }

@@ -78,7 +78,7 @@ struct ProactiveSettingsView: View {
         }
         .navigationTitle("主动消息")
         .navigationBarTitleDisplayMode(.inline)
-        .onChange(of: app.proactive.store.config) { _ in
+        .onChange(of: app.proactive.store.config) {
             app.proactive.applyConfig()
         }
     }

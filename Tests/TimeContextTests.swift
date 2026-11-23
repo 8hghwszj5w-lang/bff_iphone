@@ -46,4 +46,27 @@ final class TimeContextTests: XCTestCase {
         let empty = TimeContext.stampedUserMessage("", previousMessageTime: prev, now: now)
         XCTAssertEqual(empty, "［2026-11-20 17:05 周五］（距上一条已过去 8 小时 5 分钟）")
     }
+    /// 气泡显示要去掉时间戳前缀（模型/记忆仍保留完整文本）
+    func testStripStampRemovesPrefixOnly() {
+        let plain = TimeContext.stampedUserMessage("你好", previousMessageTime: nil,
+                                                   now: date(2026, 11, 20, 17, 5))
+        XCTAssertEqual(TimeContext.stripStamp(from: plain), "你好")
+
+        // 带间隔文案的戳：连「（距上一条已过去 …）」一起剥掉
+        let withGap = TimeContext.stampedUserMessage(
+            "在吗",
+            previousMessageTime: date(2026, 11, 20, 15, 0),
+            now: date(2026, 11, 20, 17, 5))
+        XCTAssertEqual(TimeContext.stripStamp(from: withGap), "在吗")
+
+        // 非时间戳的方括号开头文本不能被误伤
+        XCTAssertEqual(TimeContext.stripStamp(from: "［附件：x.pdf］内容"), "［附件：x.pdf］内容")
+        XCTAssertEqual(TimeContext.stripStamp(from: "普通消息"), "普通消息")
+
+        // 只发了戳（正文为空）→ 显示空串
+        let onlyStamp = TimeContext.stampedUserMessage("", previousMessageTime: nil,
+                                                       now: date(2026, 11, 20, 17, 5))
+        XCTAssertEqual(TimeContext.stripStamp(from: onlyStamp), "")
+    }
+
 }

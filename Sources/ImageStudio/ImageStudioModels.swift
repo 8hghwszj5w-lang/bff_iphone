@@ -87,6 +87,41 @@ struct StudioConfig: Codable, Equatable {
     var compose = StudioComposeConfig()
 }
 
+extension StudioConfig {
+    /// 收敛任意输入成合法配置（对应桌面端 store.js normalizeConfig）：
+    /// 数值越界夹住、枚举/画幅白名单、超长文本截断、地址去掉结尾斜杠。
+    /// load / save 时都会过一遍，手改 config.json 写坏了也不会让设置页炸掉。
+    func normalized() -> StudioConfig {
+        var c = self
+        c.api.baseURL = Self.cleanURL(c.api.baseURL)
+        c.api.model = String(c.api.model.trimmingCharacters(in: .whitespacesAndNewlines).prefix(128))
+        c.api.quality = String(c.api.quality.trimmingCharacters(in: .whitespacesAndNewlines).prefix(32))
+        if !StudioAPIConfig.aspects.contains(c.api.defaultAspect) {
+            c.api.defaultAspect = StudioAPIConfig().defaultAspect
+        }
+        c.api.timeoutSec = min(1800, max(30, c.api.timeoutSec))
+        c.policy.cooldownMin = min(240, max(0, c.policy.cooldownMin))
+        c.policy.rules = String(c.policy.rules.prefix(4000))
+        c.compose.maxRefs = min(16, max(1, c.compose.maxRefs))
+        c.compose.refsPerCharacter = min(6, max(1, c.compose.refsPerCharacter))
+        c.compose.refsPerOther = min(4, max(1, c.compose.refsPerOther))
+        c.compose.stylePrompt = String(c.compose.stylePrompt.prefix(2000))
+        c.compose.catalogInPrompt = c.compose.catalogInPrompt
+        c.compose.identityOnly = c.compose.identityOnly
+        c.compose.imageCharacter = String(
+            c.compose.imageCharacter.trimmingCharacters(in: .whitespacesAndNewlines).prefix(200))
+        return c
+    }
+
+    /// 去掉首尾空白与结尾斜杠（对应桌面端 `str(url).trim().replace(/\/+$/, '')`）
+    private static func cleanURL(_ raw: String) -> String {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.count > 512 { s = String(s.prefix(512)) }
+        while s.hasSuffix("/") { s.removeLast() }
+        return s
+    }
+}
+
 // MARK: 关键词库（情境 / 神态 / 动作 / 镜头 / 光线）
 
 /// 一条关键词。情境额外带默认搭配（场景/服饰/光线），展开时自动带上。
@@ -386,6 +421,13 @@ struct StudioError: LocalizedError {
     var errorDescription: String? { message }
 }
 
+/// 主动发图冷却中：这不是错误——对应桌面端 index.js 返回的 { ok: false, message }，
+/// 工具层要把 message 当普通文本结果给模型（而不是 {"error": …}），模型才知道「这次先不发」。
+struct StudioCooldownMessage: LocalizedError {
+    let message: String
+    var errorDescription: String? { message }
+}
+
 /// 按文件头判断图片类型（对应 library.js sniffImage），返回扩展名（含点）；不是图片返回空串
 func studioSniffImage(_ data: Data) -> String {
     guard data.count >= 12 else { return "" }
@@ -416,4 +458,75 @@ func studioSafeName(_ raw: String) -> String {
     cleaned = cleaned.components(separatedBy: .whitespacesAndNewlines).joined(separator: " ")
         .trimmingCharacters(in: CharacterSet(charactersIn: ". "))
     return String(cleaned.prefix(80))
+}
+
+// MARK: - 数据文件编解码（兼容桌面端写法）
+
+/// entry.json / history.jsonl 的日期读写。
+///
+/// 桌面端 `new Date().toISOString()` 写的是 ISO 字符串（带毫秒），而 JSONDecoder 默认的
+/// `.deferredToDate` 只吃数字时间戳——用默认解码器读桌面格式，entry.json 整条解不出来
+/// （名字 / 描述 / 默认服饰全丢），history.jsonl 整行被丢掉。这里统一兜底：
+/// 数字时间戳（秒/毫秒）、ISO 带毫秒、ISO 不带毫秒都认；写出去统一 ISO 带毫秒，与桌面端互通。
+enum StudioJSON {
+    private static let isoWithMillis: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+    private static let isoPlain: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
+
+    static func encoder() -> JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .custom { date, encoder in
+            var container = encoder.singleValueContainer()
+            try container.encode(isoWithMillis.string(from: date))
+        }
+        return encoder
+    }
+
+    /// 落盘用：字段排序 + 缩进，方便手工编辑与 diff
+    static func prettyEncoder() -> JSONEncoder {
+        let encoder = self.encoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return encoder
+    }
+
+    static func decoder() -> JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .custom { decoder in
+            let container = try decoder.singleValueContainer()
+            if let number = try? container.decode(Double.self) {
+                // 13 位按毫秒、10 位按秒（早期可能写过数字时间戳）
+                return Date(timeIntervalSince1970: abs(number) > 1e11 ? number / 1000 : number)
+            }
+            let text = try container.decode(String.self)
+            if let date = isoWithMillis.date(from: text) ?? isoPlain.date(from: text) {
+                return date
+            }
+            throw DecodingError.dataCorruptedError(in: container, debugDescription: "无法解析日期：\(text)")
+        }
+        return decoder
+    }
+
+    /// 以默认值为底、把文件里的对象叠上去（缺字段回默认，对应桌面端 store.js deepMerge）。
+    /// 桌面端的接口地址字段名是 baseUrl，这里顺手映射成 iOS 的 baseURL。
+    static func merge(base: Any, patch: Any) -> Any {
+        guard let patchObject = patch as? [String: Any],
+              let baseObject = base as? [String: Any] else { return patch }
+        var out = baseObject
+        for (key, value) in patchObject {
+            let target = key == "baseUrl" ? "baseURL" : key
+            if let existing = out[target] {
+                out[target] = merge(base: existing, patch: value)
+            } else {
+                out[target] = value
+            }
+        }
+        return out
+    }
 }

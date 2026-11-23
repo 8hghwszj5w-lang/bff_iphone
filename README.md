@@ -149,7 +149,7 @@ xcodebuild -project FenShen.xcodeproj -scheme FenShen \
 | 已冻结 / 被杀 | 预约本地通知准点「敲门」；正文 = 她设闹铃时顺手写的 `notify`（没写则用兜底文案「她惦记着一件事，想跟你说两句」）；用户回 App 后 catch-up 现生成正文进聊天 |
 | BGAppRefresh | 机会性补跑（系统不保证何时给时间，仅尽力） |
 
-通知 category 带 `allowAnnouncement` + timeSensitive 中断级别：用户开启「设置 → Siri → 播报通知」且连着 AirPods 等设备时 Siri 会念出通知。挂起闹铃落盘（Documents/proactive/state.json），重启后依然兑现；生成失败自动推迟 10 分钟重试（最多 3 次）。
+通知走 timeSensitive 中断级别（`allowAnnouncement` 自 iOS 15 起被系统忽略且已废弃，已移除；是否播报由用户在「设置 → Siri → 播报通知」决定）。挂起闹铃落盘（Documents/proactive/state.json），重启后依然兑现；生成失败自动推迟 10 分钟重试（最多 3 次）。
 
 **文件结构（Sources/Proactive/）**：`ProactivePolicy.swift`（配置 + 免打扰/顺延/概率纯函数）、`ProactiveStore.swift`（配置存 UserDefaults + 状态原子写落盘）、`ProactiveEngine.swift`（定时器/生成管线/通知与 BG 衔接）、`ProactiveTools.swift`（followup_set / followup_cancel）、`ProactiveViews.swift`（设置子页）。工具挂进 Pipeline 的 alwaysTools；回合首尾经 `beginUserTurn/endUserTurn` 与引擎互斥。
 
