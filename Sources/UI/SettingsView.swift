@@ -416,12 +416,13 @@ struct MemoryView: View {
     @State private var summaryDraft = ""
     @State private var summaryDirty = false
     @State private var confirmClearAll = false
+    @State private var isEditingSummary = false
 
     var body: some View {
         Form {
             Section {
                 row("窗口对话", "\(app.memory.record.entries.count) 条")
-                row("长期摘要", app.memory.record.summary.isEmpty
+                row("长期记忆", app.memory.record.summary.isEmpty
                         ? "空"
                         : "\(app.memory.record.summary.split(separator: "\n").count) 行 / \(app.memory.record.summary.count) 字")
                 if !app.memory.record.pending.isEmpty {
@@ -443,6 +444,23 @@ struct MemoryView: View {
                 Text("概览")
             } footer: {
                 Text("聊天优先使用近期原文。较早的对话积累后，会交给当前配置的模型单独整理：保留有后续价值的事实、偏好和约定，不把每句闲聊都写进长期记忆。整理消耗的 token 计入用量，不增加消息轮数。")
+            }
+
+            Section {
+                if app.memory.record.summary.isEmpty {
+                    Text("这里暂时是空的……等小鱼再了解你一点！")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text(app.memory.record.summary)
+                        .font(.footnote)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            } header: {
+                Text("长期记忆")
+            } footer: {
+                Text("更早的对话里值得留下的事会整理到这里。想改可以直接编辑。")
             }
 
             Section("对话窗口（左滑删除单条）") {
@@ -470,19 +488,23 @@ struct MemoryView: View {
                 }
             }
 
-            Section("长期摘要（可直接编辑）") {
-                TextEditor(text: Binding(get: { summaryDraft }, set: { text in
-                    summaryDraft = text
-                    summaryDirty = text != app.memory.record.summary
-                }))
-                    .font(.footnote)
-                    .frame(minHeight: 120)
-                Text("保存后，后续模型整理仍可能合并或更新其中的事实。")
-                    .font(.footnote).foregroundStyle(.secondary)
-                if summaryDirty {
-                    Button("保存摘要修改") {
-                        app.memory.updateSummary(summaryDraft)
-                        summaryDirty = false
+            Section {
+                if !isEditingSummary {
+                    Button("编辑长期记忆") { isEditingSummary = true }
+                } else {
+                    TextEditor(text: Binding(get: { summaryDraft }, set: { text in
+                        summaryDraft = text
+                        summaryDirty = text != app.memory.record.summary
+                    }))
+                        .font(.footnote)
+                        .frame(minHeight: 120)
+                    Text("保存后，后续模型整理仍可能合并或更新其中的事实。")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    if summaryDirty {
+                        Button("保存摘要修改") {
+                            app.memory.updateSummary(summaryDraft)
+                            summaryDirty = false
+                        }
                     }
                 }
             }
