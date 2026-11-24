@@ -458,9 +458,13 @@ struct MemoryView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             } header: {
-                Text("长期记忆")
+                Text("长期记忆（模型整理）")
             } footer: {
-                Text("更早的对话里值得留下的事会整理到这里。想改可以直接编辑。")
+                if app.memory.record.summary.isEmpty, !app.memory.record.pending.isEmpty {
+                    Text("还有 \(app.memory.record.pending.count) 段更早的对话没整理完，整理好后会出现在这里。")
+                } else {
+                    Text("这里写的是模型从更早对话中总结出的内容，不是原话。想改可以直接编辑。")
+                }
             }
 
             Section("对话窗口（左滑删除单条）") {
