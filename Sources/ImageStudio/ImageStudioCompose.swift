@@ -525,7 +525,6 @@ enum ImageStudioGuide {
         guard config.enabled else { return "" }
         var lines: [String] = []
         lines.append("# 生图（image_generate）")
-        lines.append("你可以调用 image_generate 生成图片，图片会直接显示在对话里给用户看。")
         lines.append("何时发图：\(modeText[config.policy.mode] ?? modeText[.balanced]!)")
         let rules = config.policy.rules.trimmingCharacters(in: .whitespacesAndNewlines)
         if !rules.isEmpty { lines.append("用户补充的发图规则：\(rules)") }
@@ -534,9 +533,8 @@ enum ImageStudioGuide {
         } else {
             lines.append("用户本轮明确要图时把 user_requested 设为 true。")
         }
-        lines.append("怎么调用：先想清楚角色此刻的状态——在哪、在做什么、心情如何——再选关键词：situation（情境，会自动带上对应的场景、服饰和光线）、expression（神态）、pose（动作）、shot（镜头）、light（光线），填下面列出的名字即可，会展开成具体描写；没有合适的就直接写一句具体描述。prompt 写这一张画面本身：发生了什么、和周围的互动、构图与情绪重点。")
-        lines.append("参考图只负责长相与服装设计；姿势、表情、视角、景别、光线都由关键词和 prompt 决定，不写就容易照搬参考图，所以每张图都要按当下的情境换着来，别总是同一个站姿和表情。")
-        lines.append("用 characters / outfits / scene / props 指定参考库条目（填 id 或名字）；服饰不指定时会沿用她此刻日程里穿的（那段日程写了穿搭的话），否则按情境和场景自动搭配；想让她穿别的就在 outfits 里写明。想在上一张图的基础上修改时，把它的图片编号（img- 开头）放进 extra_images。一次调用出一张图，出图需要几十秒。")
+        // 字段含义、穿搭回退、改图引用已在随请求发送的工具定义中说明。
+        lines.append("按此刻情境选关键词；不合适就用具体描写。每张图变换动作、神态和构图，不照搬参考图。一次出一张，约需几十秒。")
         let kw = keywordText(presets)
         if !kw.isEmpty {
             lines.append("可用关键词：")

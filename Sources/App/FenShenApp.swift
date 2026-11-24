@@ -71,6 +71,17 @@ final class AppState: ObservableObject {
         self.proactiveStore = proactiveStore
         let search = WebSearchTool()
         let client = DeepSeekClient(settings: settings)
+        // 整理是独立的无工具请求，不阻塞聊天，也不把整理过程写回聊天记录。
+        let usage = self.usage
+        memory.distill = { summary, transcript in
+            let (text, used) = try await client.ask(
+                messages: MemoryDistiller.messages(summary: summary, transcript: transcript),
+                tools: [], toolRunner: { _, _ in "" })
+            // 格式无效也已消耗 token；维护请求不是一轮对话。
+            usage.append(promptTokens: used.promptTokens, completionTokens: used.completionTokens,
+                         countsAsMessage: false)
+            return try MemoryDistiller.parse(text)
+        }
         // 主动消息引擎复用同一个 DeepSeekClient；ask 闭包返回 token 数给用量统计
         let proactive = ProactiveEngine(store: proactiveStore,
                                         settings: settings,

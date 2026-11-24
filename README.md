@@ -14,7 +14,7 @@ QQ/NapCat 那一层在 iOS 上无法复刻（那是 Linux QQ 容器），所以�
 | `src/model/deepseek.js`（关思考） | `DeepSeekClient`：SSE 流式 + 异常/截断检测（不自动重试，避免重复输出和费用） |
 | `src/model/tool-loop.js` 工具循环 | `ask()`：最多 3 轮 function calling |
 | `src/tools/websearch.js` 联网搜索 | `WebSearchTool`：DuckDuckGo 免费无 key |
-| `src/store/memory.js` 记忆 | `MemoryStore`：逐字窗口 + 滚动摘要 + 原子写（tmp+rename，坏文件留档） |
+| `src/store/memory.js` 记忆 | `MemoryStore`：近期原文 + 模型筛选的长期摘要；原子写，坏文件留档 |
 | `src/core/pipeline.js` 流水线 | `Pipeline`：收消息 → 记忆 → 模型(可调工具) → 清洗 → 落盘 |
 | `src/config/schema.js` 配置 | `SettingsStore`：设置页（key / 模型 / 温度 / 窗口长度 / 搜索开关） |
 | `src/core/usage.js` 用量 | `UsageStore` + 「用量信息」页（设置页置顶，累计/每日 token 统计，落盘 usage.json） |
@@ -31,6 +31,12 @@ QQ/NapCat 那一层在 iOS 上无法复刻（那是 Linux QQ 容器），所以�
    - 其他二进制类型：退回本地纯文本抽取（超 8000 字截断）。
    附件轻量记入记忆（file_id 不落盘），之后仍可追问本轮内容。
 4. 设置页置顶还有：**用量信息**（累计/每日 token、估算花费、官方定价）、**充值**（拉起 Safari 收银台 + 微信/支付宝）、**记忆管理**（浏览窗口、编辑长期摘要、导出 JSON、分段清理）、**人设**（编辑她的性格和说话方式）、**聊天背景**（纯色/渐变/相册照片，选图后可拖动+双指缩放裁剪，支持全屏/3:4/1:1/16:9 比例，原图可反复重裁）、**每日日程**（对应桌面端 dsh-daily-schedule：今天/明天时间线编辑，自动生成"她此刻的生活背景"注入每轮对话，她还能用 schedule_adjust / schedule_view 两个工具自己记事和改计划，日程时间段还能写穿搭，生图时会沿用）、**生图工作室**（对应桌面端 dsh-image-studio，详见下节）。**本机信息工具**：日历读写（calendar_read / calendar_create）、提醒事项读写（reminders_read / reminders_create）、备忘录搜索（notes_search，受系统能力限制只能查标题/摘要）。
+
+### 长期记忆如何整理
+
+近期对话保留原文，方便接着追问。超过设置的逐字窗口后，较早的原文进入本机待整理队列。队列累计至少 400 字时，App 使用已配置的聊天模型按批次整理，不等待整理完成才回复，也不会在没有新消息时启动定时请求。模型只读旧摘要和待整理的文本，不携带工具、人设、日程或参考库；它负责合并重复内容、更新已被纠正的信息，保留以后可能用到的偏好、决定和待办，略过寒暄。整理失败不会用空结果覆盖旧摘要。
+
+整理请求本身也会消耗 token，收益来自之后多轮不再反复发送已整理的原文，短对话不一定更便宜。整理用量纳入「用量信息」，不算作聊天轮数。可到「设置 → 记忆管理」检查、修订或清空摘要。
 
 ## 移植的桌面端插件
 

@@ -229,7 +229,7 @@ struct UsageView: View {
         Form {
             Section {
                 row("总 token", app.usage.stats.totalTokens)
-                row("提问 token", app.usage.stats.totalPromptTokens)
+                row("输入 token（含上下文）", app.usage.stats.totalPromptTokens)
                 row("回答 token", app.usage.stats.totalCompletionTokens)
                 row("消息轮数", app.usage.stats.totalMessages)
                 row("估算花费（上限）", "≈ \(String(format: "%.2f", estimatedCost)) 元")
@@ -239,7 +239,7 @@ struct UsageView: View {
             } header: {
                 Text("累计")
             } footer: {
-                Text("花费按「高峰时段 + 缓存未命中」的最贵价估算，实际因缓存命中和空闲时段会更低。统计含每次回复的全部 token（联网搜索的多轮工具调用也计入）。")
+                Text("花费按「高峰时段 + 缓存未命中」的最贵价估算，实际因缓存命中和空闲时段会更低。输入包含上下文；工具续问和长期记忆整理的 token 也计入。整理不另计消息轮数。")
             }
             Section {
                 row("输入 · 缓存命中", "高峰 \(fmt(pricing.hit)) 元 / 空闲 \(fmt(pricing.hit / 2)) 元")
@@ -424,6 +424,14 @@ struct MemoryView: View {
                 row("长期摘要", app.memory.record.summary.isEmpty
                         ? "空"
                         : "\(app.memory.record.summary.split(separator: "\n").count) 行 / \(app.memory.record.summary.count) 字")
+                if !app.memory.record.pending.isEmpty {
+                    row("待整理原文", "\(app.memory.record.pending.count) 段")
+                }
+                if app.memory.isDistilling {
+                    row("模型整理", "进行中，不影响聊天")
+                } else if app.memory.record.distillRetryAfter != nil {
+                    row("模型整理", "上次未完成，后续对话再试")
+                }
                 if let oldest = app.memory.record.entries.first?.time {
                     row("窗口最早一条", oldest.formatted(date: .abbreviated, time: .shortened))
                 }
@@ -434,7 +442,7 @@ struct MemoryView: View {
             } header: {
                 Text("概览")
             } footer: {
-                Text("「窗口」是逐字保留的近期对话（超限自动压缩进摘要）；「摘要」是更早对话的长期记忆，两者都会喂给模型。")
+                Text("聊天优先使用近期原文。较早的对话积累后，会交给当前配置的模型单独整理：保留有后续价值的事实、偏好和约定，不把每句闲聊都写进长期记忆。整理消耗的 token 计入用量，不增加消息轮数。")
             }
 
             Section("对话窗口（左滑删除单条）") {
@@ -463,12 +471,14 @@ struct MemoryView: View {
             }
 
             Section("长期摘要（可直接编辑）") {
-                TextEditor(text: $summaryDraft)
+                TextEditor(text: Binding(get: { summaryDraft }, set: { text in
+                    summaryDraft = text
+                    summaryDirty = text != app.memory.record.summary
+                }))
                     .font(.footnote)
                     .frame(minHeight: 120)
-                    .onChange(of: summaryDraft) { _, newValue in
-                        summaryDirty = newValue != app.memory.record.summary
-                    }
+                Text("保存后，后续模型整理仍可能合并或更新其中的事实。")
+                    .font(.footnote).foregroundStyle(.secondary)
                 if summaryDirty {
                     Button("保存摘要修改") {
                         app.memory.updateSummary(summaryDraft)
@@ -481,7 +491,7 @@ struct MemoryView: View {
                 ShareLink("导出记忆 JSON（备份）", item: app.memory.exportText)
             }
 
-            Section("危险操作") {
+            Section {
                 Button("清空对话窗口（保留摘要）", role: .destructive) {
                     app.memory.clearEntries()
                 }
@@ -501,6 +511,10 @@ struct MemoryView: View {
                         summaryDirty = false
                     }
                 }
+            } header: {
+                Text("危险操作")
+            } footer: {
+                Text("清空窗口或摘要也会删除待整理的旧对话，避免已清除的内容被后台整理写回。")
             }
         }
         .navigationTitle("记忆管理")
@@ -508,6 +522,10 @@ struct MemoryView: View {
         .onAppear {
             summaryDraft = app.memory.record.summary
             summaryDirty = false
+        }
+        .onChange(of: app.memory.record.summary) { _, summary in
+            // 自动整理可能在此页面停留期间完成，不覆盖尚未保存的手动输入。
+            if !summaryDirty { summaryDraft = summary }
         }
     }
 

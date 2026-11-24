@@ -212,6 +212,10 @@ final class ImageStudioTests: XCTestCase {
         XCTAssertTrue(plan.notes.contains { $0.contains("自动认出") })
     }
 
+    private static func extraRef(_ id: String) -> StudioRef {
+        StudioRef(kind: "extra", label: "上一张生成图（\(id)）")
+    }
+
     func testReferenceBudgetAccountsForExtraCount() {
         var config = StudioConfig()
         config.compose.maxRefs = 3
