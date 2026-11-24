@@ -68,6 +68,24 @@ final class ScheduleGenerateTests: XCTestCase {
 
     // MARK: 解析
 
+    func testPromptShowsDayEnvelopeWithFieldsInsideItems() throws {
+        let wardrobe = ScheduleWardrobe(situations: [.init(name: "睡前")])
+        for library: ScheduleWardrobe? in [nil, wardrobe] {
+            let prompt = ScheduleGenerator.buildPrompt(characterName: "小深", persona: "", date: Date(),
+                                                       type: ScheduleDayType.defaults[0], recent: "", hint: "",
+                                                       wardrobe: library)
+            let example = try XCTUnwrap(prompt.split(separator: "\n").last)
+            let json = try JSONSerialization.jsonObject(with: Data(example.utf8))
+            let day = try XCTUnwrap(json as? [String: Any])
+            XCTAssertNotNil(day["title"] as? String)
+            XCTAssertNotNil(day["mood"] as? String)
+            let items = try XCTUnwrap(day["items"] as? [[String: Any]])
+            let first = try XCTUnwrap(items.first)
+            for key in ["start", "end", "activity"] { XCTAssertNotNil(first[key] as? String) }
+            XCTAssertEqual(first["situation"] as? String, library == nil ? nil : "睡前")
+        }
+    }
+
     func testParseScheduleStripsFencesAndNormalizes() throws {
         let parsed = try ScheduleGenerator.parseSchedule(Self.goodLLMOutput())
         XCTAssertEqual(parsed.title, "平稳的一天")

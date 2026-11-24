@@ -179,8 +179,8 @@ enum ScheduleGenerator {
             situations.isEmpty ? "" : "- situation：从这些情境里挑最贴近的一个（\(situations.joined(separator: "、"))），都不贴近就留空。",
         ]
         lines.append(contentsOf: wardrobeInfo.rules)
-        lines.append("只输出一个 JSON 对象，不要任何其他文字或代码块标记：")
-        lines.append(Self.jsonString(example))
+        lines.append("只输出一个 JSON 对象：title 是这一天的标题，mood 是当天心情，items 是按时间排列的完整日程数组。下面只展示第一段的格式，实际请在 items 中续写到 24:00，不要输出其他文字或代码块标记：")
+        lines.append(Self.jsonString(["title": "平稳的一天", "mood": "轻松", "items": [example]]))
         return lines.filter { !$0.isEmpty }.joined(separator: "\n")
     }
 
@@ -205,7 +205,11 @@ enum ScheduleGenerator {
             throw NSError(domain: "ScheduleGen", code: 2,
                           userInfo: [NSLocalizedDescriptionKey: "日程 JSON 解析失败"])
         }
-        let rawItems = (obj["items"] as? [[String: Any]] ?? []).compactMap(Self.item(from:))
+        guard let entries = obj["items"] as? [[String: Any]] else {
+            throw NSError(domain: "ScheduleGen", code: 4,
+                          userInfo: [NSLocalizedDescriptionKey: "模型返回的日程缺少有效的 items 数组"])
+        }
+        let rawItems = entries.compactMap(Self.item(from:))
         let items = ScheduleNormalizer.normalize(rawItems)
         guard items.count >= 4 else {
             throw NSError(domain: "ScheduleGen", code: 3,
