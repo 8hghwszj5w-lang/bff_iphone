@@ -77,13 +77,23 @@ final class DeviceToolTests: XCTestCase {
     }
 
     func testClampCalendarDays() {
-        XCTAssertEqual(DeviceToolCalendar.clampDays(nil), 1)
+        XCTAssertEqual(DeviceToolCalendar.clampDays(nil), 7, "不传 days 默认看一周")
         XCTAssertEqual(DeviceToolCalendar.clampDays(0), 1)
         XCTAssertEqual(DeviceToolCalendar.clampDays(0.5), 1)
+        XCTAssertEqual(DeviceToolCalendar.clampDays(1), 1)
         XCTAssertEqual(DeviceToolCalendar.clampDays(7), 7)
         XCTAssertEqual(DeviceToolCalendar.clampDays(7.9), 7)
         XCTAssertEqual(DeviceToolCalendar.clampDays(31), 30)
         XCTAssertEqual(DeviceToolCalendar.clampDays(.infinity), 1)
+    }
+
+    func testDefaultRangeCoversAWeek() {
+        // 缺省 days（不传）→ 一周窗口：今天 0 点到第 8 天 0 点
+        let now = makeDate(2026, 11, 22, 13, 0)
+        let days = DeviceToolCalendar.clampDays(nil)
+        let range = DeviceToolCalendar.range(of: now, days: days, timeZone: timeZone)
+        XCTAssertEqual(range.start, makeDate(2026, 11, 22))
+        XCTAssertEqual(range.end, makeDate(2026, 11, 29))
     }
 
     func testCalendarReadArgsDecoding() {

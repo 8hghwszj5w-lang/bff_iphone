@@ -9,7 +9,7 @@ import Foundation
 //   · "HH:MM" → 今天该时刻；完整 "yyyy-MM-dd HH:MM" → 指定那天
 //   · 缺省 end = start + 1 小时（日历）；all_day 时 end 缺省 = start + 1 天
 //   · calendar_read 的 day 是起点（today/tomorrow/yesterday），days 是连续天数
-//     （默认 1，最多 30；「这周」= day: today + days: 7，多天按天分组输出）
+//     （默认 7 = 一周，最多 30；只看某天传 days: 1，多天按天分组输出）
 //
 // apple_pim_today 对齐桌面端 @local/apple-pim（2026-11-20 单工具版）：
 //   · 提醒：未完成的「今日到期 + 已逾期 + days_ahead 窗口内」，逾期判定用今天零点
@@ -68,9 +68,13 @@ enum DeviceToolCalendar {
     /// calendar_read 一次最多看多少天（与 apple_pim_today 的 days_ahead 上限一致）
     static let maxDays = 30
 
-    /// calendar_read 的 days 参数：缺省 / 非数字 / 小于 1 都按 1 天；上限夹到 maxDays
+    /// 不传 days 时默认看一周（今天起 7 天）
+    static let defaultDays = 7
+
+    /// calendar_read 的 days 参数：缺省 → 一周；非数字 / 小于 1 → 1 天；上限夹到 maxDays
     static func clampDays(_ raw: Double?) -> Int {
-        guard let raw, raw.isFinite, raw >= 1 else { return 1 }
+        guard let raw else { return defaultDays }
+        guard raw.isFinite, raw >= 1 else { return 1 }
         return min(Int(raw.rounded(.down)), maxDays)
     }
 
@@ -531,7 +535,7 @@ struct CalendarReadTool: AgentTool {
     var definition: ToolDefinition {
         ToolDefinition(function: .init(
             name: "calendar_read",
-            description: "查看用户手机日历上的日程安排（跨 App 的真实日历，不是你自己的生活日程）。只看某一天用 day；要从某天起连续看几天（最长 30 天）再加 days。用户问「我今天有什么会」「明天忙不忙」只传 day；问「这周有什么安排」「未来几天忙不忙」「后天有什么」传 day=today、days=7（多天按天分组，空的日子也会写出来）。全天事件显示「全天」，跨天事件带日期。",
+            description: "查看用户手机日历上的日程安排（跨 App 的真实日历，不是你自己的生活日程）。默认从 day 起看一周（7 天）：不传 days 就是一周，多天按天分组、空的日子也会列出来；只要某一天传 days=1；要看更久最多 30 天。用户问「这周有什么安排」「未来几天忙不忙」「后天有什么」直接用默认一周；只问当天或明天的细节时传 days=1。全天事件显示「全天」，跨天事件带日期。",
             parameters: .object([
                 "type": .string("object"),
                 "properties": .object([
@@ -542,7 +546,7 @@ struct CalendarReadTool: AgentTool {
                     ]),
                     "days": .object([
                         "type": .string("number"),
-                        "description": .string("从 day 那天起连续看几天，1–30，默认 1（只看那一天）。「这周 / 未来一周」传 7。"),
+                        "description": .string("从 day 那天起连续看几天，1–30，默认 7（一周）。只要某一天传 1；「这周 / 未来一周」保持默认。"),
                     ]),
                 ]),
             ])))
