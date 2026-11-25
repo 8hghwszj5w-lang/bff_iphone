@@ -66,7 +66,7 @@ final class DeviceToolTests: XCTestCase {
         XCTAssertEqual(range.end, makeDate(2026, 11, 23))
     }
 
-    // MARK: calendar_read 多看几天（未来一周）
+    // MARK: calendar_read 多看几天（缺省三天 / 最多 30 天）
 
     func testCalendarRangeSpansRequestedDays() {
         let week = DeviceToolCalendar.range(of: makeDate(2026, 11, 22, 13, 0), days: 7, timeZone: timeZone)
@@ -77,7 +77,7 @@ final class DeviceToolTests: XCTestCase {
     }
 
     func testClampCalendarDays() {
-        XCTAssertEqual(DeviceToolCalendar.clampDays(nil), 7, "不传 days 默认看一周")
+        XCTAssertEqual(DeviceToolCalendar.clampDays(nil), 3, "不传 days 默认看今天起三天")
         XCTAssertEqual(DeviceToolCalendar.clampDays(0), 1)
         XCTAssertEqual(DeviceToolCalendar.clampDays(0.5), 1)
         XCTAssertEqual(DeviceToolCalendar.clampDays(1), 1)
@@ -87,13 +87,14 @@ final class DeviceToolTests: XCTestCase {
         XCTAssertEqual(DeviceToolCalendar.clampDays(.infinity), 1)
     }
 
-    func testDefaultRangeCoversAWeek() {
-        // 缺省 days（不传）→ 一周窗口：今天 0 点到第 8 天 0 点
+    func testDefaultRangeCoversThreeDays() {
+        // 缺省 days（不传）→ 三天窗口：今天 0 点到第 4 天 0 点
         let now = makeDate(2026, 11, 22, 13, 0)
         let days = DeviceToolCalendar.clampDays(nil)
+        XCTAssertEqual(days, 3)
         let range = DeviceToolCalendar.range(of: now, days: days, timeZone: timeZone)
         XCTAssertEqual(range.start, makeDate(2026, 11, 22))
-        XCTAssertEqual(range.end, makeDate(2026, 11, 29))
+        XCTAssertEqual(range.end, makeDate(2026, 11, 25))
     }
 
     func testCalendarReadArgsDecoding() {

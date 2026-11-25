@@ -83,7 +83,7 @@ LLM 流式文本按句末标点切句（`SentenceSplitter`，数字小数点如 
 - 首次让 AI 查日历/提醒事项时会弹系统授权框；拒绝后工具会返回设置路径的指引文案。
 - 权限声明（project.yml）：日历完全访问 + 只写、提醒事项完全访问、相机、麦克风、语音识别。
 - 日历/提醒事项走 EventKit（可读可写）；**备忘录没有公开 API**，只能经 Spotlight 搜标题/摘要（搜不到全文，新记的或锁定的搜不到，写入需在系统 App 操作）。
-- `calendar_read` 默认看从 `day` 起的一周（`day` = today / tomorrow / yesterday）；只要某一天传 `days: 1`，要看更久最多 `days: 30`，多天结果按天分组、空的日子也会写出来。
+- `calendar_read` 默认看从 `day` 起的三天（`day` = today / tomorrow / yesterday）；只要某一天传 `days: 1`，看一周传 `days: 7`，最多 `days: 30`，多天结果按天分组、空的日子也会写出来。
 - 模拟器上日历/提醒事项默认没有数据，返回空列表是正常的。
 
 ## 8. 故障排查
