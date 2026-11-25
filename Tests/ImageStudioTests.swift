@@ -432,7 +432,9 @@ final class ImageStudioTests: XCTestCase {
         do {
             _ = try await store.generate(second, source: "tool")
             XCTFail("冷却期内应拒绝")
-        } catch let error as StudioError {
+        } catch let error as StudioCooldownMessage {
+            // 冷却不是错误：store 抛的是 StudioCooldownMessage（工具层当普通文本回给模型），
+            // 不是 StudioError——这里要按真实类型捕获
             XCTAssertTrue(error.message.contains("冷却"))
         }
         // 用户明确要图时不受限
@@ -589,6 +591,15 @@ final class ImageStudioTests: XCTestCase {
         let error = ImageStudioClient.readError(status: 401, body: Data(#"{"error":{"message":"bad key"}}"#.utf8))
         XCTAssertTrue(error.message.contains("API Key 无效"))
         XCTAssertTrue(error.message.contains("bad key"))
+        // 中转对不存在的模型名也回 404：提示应指向模型名，而不是 Base URL
+        let modelErr = ImageStudioClient.readError(
+            status: 404, body: Data(#"{"error":{"message":"Model not exist.","code":"model_not_found"}}"#.utf8))
+        XCTAssertTrue(modelErr.message.contains("模型名不存在"))
+        XCTAssertTrue(modelErr.message.contains("Model not exist"))
+        // 接口真不存在的 404（空响应体，如 /images/edits 未实现）仍提示查 Base URL
+        let routeErr = ImageStudioClient.readError(status: 404, body: Data())
+        XCTAssertTrue(routeErr.message.contains("Base URL"))
+        XCTAssertFalse(routeErr.message.contains("模型名"))
     }
 
     func testListModelsPicksImageCapableEntries() async throws {

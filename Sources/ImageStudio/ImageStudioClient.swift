@@ -61,7 +61,20 @@ struct ImageStudioClient: Sendable {
                 .trimmingCharacters(in: .whitespaces)
             message = String(text.prefix(300))
         }
-        let head = friendlyStatus[status].map { "\($0)（HTTP \(status)）" } ?? "HTTP \(status)"
+        var head = friendlyStatus[status].map { "\($0)（HTTP \(status)）" } ?? "HTTP \(status)"
+        // 不少中转对不存在的模型名也回 404（如 Model not exist / model_not_found）：
+        // 这时问题在模型名而不是 Base URL，提示要指向模型名，别把人支去查地址。
+        // 接口真不存在（如 /images/edits 未实现）的 404 响应体里没有模型字样，仍提示查 Base URL。
+        if status == 404 {
+            let lower = message.lowercased()
+            let raw = String(decoding: body, as: UTF8.self).lowercased()
+            let modelMissing = lower.range(of: #"model.{0,60}(not exist|not found|not_found)"#,
+                                           options: .regularExpression) != nil
+                || raw.contains("model_not_found")
+            if modelMissing {
+                head = "生图模型名不存在（检查设置里的生图模型名）（HTTP 404）"
+            }
+        }
         return StudioError(message: message.isEmpty ? head : "\(head)：\(message)")
     }
 
