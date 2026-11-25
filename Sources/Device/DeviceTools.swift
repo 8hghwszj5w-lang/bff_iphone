@@ -8,6 +8,8 @@ import Foundation
 // 模型会把指引转告用户。时间参数约定：
 //   · "HH:MM" → 今天该时刻；完整 "yyyy-MM-dd HH:MM" → 指定那天
 //   · 缺省 end = start + 1 小时（日历）；all_day 时 end 缺省 = start + 1 天
+//   · calendar_read 的 day 是起点（today/tomorrow/yesterday），days 是连续天数
+//     （默认 1，最多 30；「这周」= day: today + days: 7，多天按天分组输出）
 //
 // apple_pim_today 对齐桌面端 @local/apple-pim（2026-11-20 单工具版）：
 //   · 提醒：未完成的「今日到期 + 已逾期 + days_ahead 窗口内」，逾期判定用今天零点
@@ -58,12 +60,28 @@ enum DeviceToolCalendar {
         return cal.startOfDay(for: date)
     }
 
-    /// 某天 00:00–24:00 的区间（calendar_read 用）
+    /// 某天 00:00–24:00 的区间（calendar_read 单日）
     static func dayRange(of date: Date, timeZone: TimeZone = .current) -> (start: Date, end: Date) {
+        range(of: date, days: 1, timeZone: timeZone)
+    }
+
+    /// calendar_read 一次最多看多少天（与 apple_pim_today 的 days_ahead 上限一致）
+    static let maxDays = 30
+
+    /// calendar_read 的 days 参数：缺省 / 非数字 / 小于 1 都按 1 天；上限夹到 maxDays
+    static func clampDays(_ raw: Double?) -> Int {
+        guard let raw, raw.isFinite, raw >= 1 else { return 1 }
+        return min(Int(raw.rounded(.down)), maxDays)
+    }
+
+    /// 从某天起连续 days 天的区间：[当天 0 点, 当天 0 点 + days 天)。不足 1 天按 1 天。
+    static func range(of date: Date, days: Int, timeZone: TimeZone = .current) -> (start: Date, end: Date) {
         var cal = Calendar.current
         cal.timeZone = timeZone
         let start = cal.startOfDay(for: date)
-        let end = cal.date(byAdding: .day, value: 1, to: start) ?? start.addingTimeInterval(86_400)
+        let span = max(1, days)
+        let end = cal.date(byAdding: .day, value: span, to: start)
+            ?? start.addingTimeInterval(Double(span) * 86_400)
         return (start, end)
     }
 }
@@ -195,16 +213,84 @@ enum DeviceToolFormatter {
             + " – \(monthDay(event.end, timeZone: timeZone)) \(clock(event.end, timeZone: timeZone))"
     }
 
+    /// 单条事件的一行文本：「时间 标题（地点）（日历「X」）」
+    static func eventLine(_ event: DeviceEventItem, timeZone: TimeZone = .current) -> String {
+        let title = event.title.isEmpty ? "(无标题)" : event.title
+        var line = "\(timeRangeText(event, timeZone: timeZone)) \(title)"
+        if !event.location.isEmpty { line += "（\(event.location)）" }
+        if !event.calendar.isEmpty { line += "（日历「\(event.calendar)」）" }
+        return line
+    }
+
     /// calendar_read 的文本：每行「时间 标题（地点）（日历「X」）」
     static func eventsText(_ events: [DeviceEventItem], timeZone: TimeZone = .current) -> String {
         guard !events.isEmpty else { return "那天日历上是空的。" }
-        return events.map { event in
-            let title = event.title.isEmpty ? "(无标题)" : event.title
-            var line = "\(timeRangeText(event, timeZone: timeZone)) \(title)"
-            if !event.location.isEmpty { line += "（\(event.location)）" }
-            if !event.calendar.isEmpty { line += "（日历「\(event.calendar)」）" }
-            return line
-        }.joined(separator: "\n")
+        return events.map { eventLine($0, timeZone: timeZone) }.joined(separator: "\n")
+    }
+
+    /// 多天窗口里每天最多列多少条（超出时明确告知，不静默截断）
+    static let maxMultiDayLines = 120
+
+    /// 「11/25 周二」
+    static func dayLabel(_ date: Date, timeZone: TimeZone = .current) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "M/d EEE"
+        f.locale = Locale(identifier: "zh_CN")
+        f.timeZone = timeZone
+        return f.string(from: date)
+    }
+
+    /// calendar_read 多天窗口的文本：先给查询范围，再按天分组，空的当天明确写「（没有日程）」，
+    /// 让模型一眼看出哪几天占满、哪几天空着（只发有事件的日子会让空档变得含糊）。
+    static func multiDayEventsText(_ events: [DeviceEventItem], from start: Date, to end: Date,
+                                   timeZone: TimeZone = .current) -> String {
+        var cal = Calendar.current
+        cal.timeZone = timeZone
+        let firstDay = cal.startOfDay(for: start)
+        let endDay = cal.startOfDay(for: end)
+
+        // 按「开始日」归组；窗口之前就开始的跨天事件算进第一天
+        var grouped: [Date: [DeviceEventItem]] = [:]
+        for event in events.sorted(by: { $0.start < $1.start }) {
+            let day = max(cal.startOfDay(for: event.start), firstDay)
+            grouped[day, default: []].append(event)
+        }
+
+        var days: [Date] = []
+        var cursor = firstDay
+        while cursor < endDay {
+            days.append(cursor)
+            guard let next = cal.date(byAdding: .day, value: 1, to: cursor) else { break }
+            cursor = next
+        }
+        guard let lastDay = days.last else { return eventsText(events, timeZone: timeZone) }
+
+        var lines = ["查询范围：\(dayLabel(firstDay, timeZone: timeZone)) – \(dayLabel(lastDay, timeZone: timeZone))"
+                     + "（\(days.count) 天，共 \(events.count) 个日程）"]
+        guard !events.isEmpty else {
+            lines.append("这几天日历上是空的。")
+            return lines.joined(separator: "\n")
+        }
+
+        var printed = 0
+        var hidden = 0
+        for day in days {
+            let items = grouped[day] ?? []
+            let head = dayLabel(day, timeZone: timeZone)
+            lines.append(items.isEmpty ? "\(head)（没有日程）" : head)
+            for event in items {
+                if printed >= maxMultiDayLines {
+                    hidden += 1
+                    continue
+                }
+                lines.append("· \(eventLine(event, timeZone: timeZone))")
+                printed += 1
+            }
+        }
+        if hidden > 0 {
+            lines.append("……还有 \(hidden) 个日程没显示（单次最多 \(maxMultiDayLines) 条，可以把 days 调小分几次看）。")
+        }
+        return lines.joined(separator: "\n")
     }
 
     // 兼容期临时保留：Lead 接线前 RemindersReadTool 还在用，接线后连同工具一起移除。
@@ -445,36 +531,77 @@ struct CalendarReadTool: AgentTool {
     var definition: ToolDefinition {
         ToolDefinition(function: .init(
             name: "calendar_read",
-            description: "查看用户手机日历上某天有哪些日程安排（跨 App 的真实日历，不是你自己的生活日程）。用户问「我今天有什么会」「明天忙不忙」时用。全天事件显示「全天」，跨天事件带日期。",
+            description: "查看用户手机日历上的日程安排（跨 App 的真实日历，不是你自己的生活日程）。只看某一天用 day；要从某天起连续看几天（最长 30 天）再加 days。用户问「我今天有什么会」「明天忙不忙」只传 day；问「这周有什么安排」「未来几天忙不忙」「后天有什么」传 day=today、days=7（多天按天分组，空的日子也会写出来）。全天事件显示「全天」，跨天事件带日期。",
             parameters: .object([
                 "type": .string("object"),
                 "properties": .object([
                     "day": .object([
                         "type": .string("string"),
                         "enum": .array([.string("today"), .string("tomorrow"), .string("yesterday")]),
-                        "description": .string("看哪一天，默认今天。"),
-                    ])
+                        "description": .string("从哪一天开始看，默认 today。"),
+                    ]),
+                    "days": .object([
+                        "type": .string("number"),
+                        "description": .string("从 day 那天起连续看几天，1–30，默认 1（只看那一天）。「这周 / 未来一周」传 7。"),
+                    ]),
                 ]),
             ])))
     }
 
     func run(argumentsJSON: String) async -> String {
-        let dayName = (try? JSONDecoder().decode(DayArg.self, from: Data(argumentsJSON.utf8)))?.day ?? "today"
+        let args = CalendarReadArgs.decode(argumentsJSON)
+        let dayName = args.day ?? "today"
         guard let date = DeviceToolCalendar.day(named: dayName) else {
             return "{\"error\": \"day 只能是 today / tomorrow / yesterday\"}"
         }
+        let days = DeviceToolCalendar.clampDays(args.days)
         if let denial = await bridge.requestCalendarAccess() { return denial }
         do {
-            let bounds = DeviceToolCalendar.dayRange(of: date)
+            let bounds = DeviceToolCalendar.range(of: date, days: days)
             let events = try bridge.eventItems(from: bounds.start, to: bounds.end)
-            return DeviceToolFormatter.eventsText(events)
+            return days == 1
+                ? DeviceToolFormatter.eventsText(events)
+                : DeviceToolFormatter.multiDayEventsText(events, from: bounds.start, to: bounds.end)
         } catch {
             return "日历读取失败：\(error.localizedDescription)"
         }
     }
 }
 
-private struct DayArg: Decodable { let day: String }
+// MARK: calendar_read 参数（容错解码，可单测）
+
+struct CalendarReadArgs {
+    var day: String?
+    var days: Double?
+
+    init(day: String?, days: Double?) {
+        self.day = day
+        self.days = days
+    }
+
+    /// 缺字段 / 类型不对 / 整段不是 JSON 都退回缺省（今天、1 天），与 apple_pim_today 同风格
+    static func decode(_ json: String) -> CalendarReadArgs {
+        guard let data = json.data(using: .utf8),
+              let raw = try? JSONDecoder().decode(Raw.self, from: data) else {
+            return CalendarReadArgs(day: nil, days: nil)
+        }
+        return CalendarReadArgs(day: raw.day, days: raw.days)
+    }
+
+    private struct Raw: Decodable {
+        var day: String?
+        var days: Double?
+
+        enum CodingKeys: String, CodingKey { case day, days }
+
+        /// 逐字段容错：某个字段类型不对只丢该字段
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            day = (try? container.decodeIfPresent(String.self, forKey: .day)) ?? nil
+            days = (try? container.decodeIfPresent(Double.self, forKey: .days)) ?? nil
+        }
+    }
+}
 
 // MARK: 日历创建
 

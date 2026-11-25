@@ -66,6 +66,86 @@ final class DeviceToolTests: XCTestCase {
         XCTAssertEqual(range.end, makeDate(2026, 11, 23))
     }
 
+    // MARK: calendar_read 多看几天（未来一周）
+
+    func testCalendarRangeSpansRequestedDays() {
+        let week = DeviceToolCalendar.range(of: makeDate(2026, 11, 22, 13, 0), days: 7, timeZone: timeZone)
+        XCTAssertEqual(week.start, makeDate(2026, 11, 22), "窗口从当天零点开始")
+        XCTAssertEqual(week.end, makeDate(2026, 11, 29), "7 天窗口到第 8 天零点")
+        let single = DeviceToolCalendar.range(of: makeDate(2026, 11, 22, 13, 0), days: 0, timeZone: timeZone)
+        XCTAssertEqual(single.end, makeDate(2026, 11, 23), "不足 1 天按 1 天")
+    }
+
+    func testClampCalendarDays() {
+        XCTAssertEqual(DeviceToolCalendar.clampDays(nil), 1)
+        XCTAssertEqual(DeviceToolCalendar.clampDays(0), 1)
+        XCTAssertEqual(DeviceToolCalendar.clampDays(0.5), 1)
+        XCTAssertEqual(DeviceToolCalendar.clampDays(7), 7)
+        XCTAssertEqual(DeviceToolCalendar.clampDays(7.9), 7)
+        XCTAssertEqual(DeviceToolCalendar.clampDays(31), 30)
+        XCTAssertEqual(DeviceToolCalendar.clampDays(.infinity), 1)
+    }
+
+    func testCalendarReadArgsDecoding() {
+        let week = CalendarReadArgs.decode(#"{"day": "today", "days": 7}"#)
+        XCTAssertEqual(week.day, "today")
+        XCTAssertEqual(week.days, 7)
+
+        let empty = CalendarReadArgs.decode("{}")
+        XCTAssertNil(empty.day)
+        XCTAssertNil(empty.days)
+
+        let wrongTypes = CalendarReadArgs.decode(#"{"day": 1, "days": "7"}"#)
+        XCTAssertNil(wrongTypes.day)
+        XCTAssertNil(wrongTypes.days)
+
+        let garbage = CalendarReadArgs.decode("不是 JSON")
+        XCTAssertNil(garbage.day)
+        XCTAssertNil(garbage.days)
+    }
+
+    // MARK: calendar_read 多天文本：按天分组 / 空日子 / 截断
+
+    func testMultiDayEventsTextGroupsByDayAndMarksEmptyDays() {
+        let start = makeDate(2026, 11, 22)
+        let end = makeDate(2026, 11, 29)
+        let events = [
+            DeviceEventItem(id: "e1", calendar: "工作", title: "周会",
+                            start: makeDate(2026, 11, 22, 9, 0), end: makeDate(2026, 11, 22, 10, 0),
+                            allDay: false, location: "三楼"),
+            DeviceEventItem(id: "e2", calendar: "个人", title: "体检",
+                            start: makeDate(2026, 11, 24, 8, 30), end: makeDate(2026, 11, 24, 10, 30),
+                            allDay: false, location: ""),
+        ]
+        let text = DeviceToolFormatter.multiDayEventsText(events, from: start, to: end, timeZone: timeZone)
+        XCTAssertTrue(text.contains("查询范围：11/22 周日 – 11/28 周六（7 天，共 2 个日程）"), "范围标题：\(text)")
+        XCTAssertTrue(text.contains("11/22 周日\n· 09:00–10:00 周会（三楼）（日历「工作」）"), "首日分组：\(text)")
+        XCTAssertTrue(text.contains("11/23 周一（没有日程）"), "空日子要写出来：\(text)")
+        XCTAssertTrue(text.contains("· 08:30–10:30 体检（日历「个人」）"), "事件行：\(text)")
+    }
+
+    func testMultiDayEventsTextEmptyRange() {
+        let start = makeDate(2026, 11, 22)
+        let end = makeDate(2026, 11, 29)
+        let text = DeviceToolFormatter.multiDayEventsText([], from: start, to: end, timeZone: timeZone)
+        XCTAssertTrue(text.contains("查询范围：11/22 周日 – 11/28 周六（7 天，共 0 个日程）"), "范围标题：\(text)")
+        XCTAssertTrue(text.contains("这几天日历上是空的。"), "整段为空要明说：\(text)")
+    }
+
+    func testMultiDayEventsTextTruncatesWithNote() {
+        let start = makeDate(2026, 11, 22)
+        let end = makeDate(2026, 11, 25)
+        let many = (0..<(DeviceToolFormatter.maxMultiDayLines + 2)).map { index in
+            DeviceEventItem(id: "e\(index)", calendar: "工作", title: "会\(index)",
+                            start: makeDate(2026, 11, 22, 9, 0), end: makeDate(2026, 11, 22, 10, 0),
+                            allDay: false, location: "")
+        }
+        let text = DeviceToolFormatter.multiDayEventsText(many, from: start, to: end, timeZone: timeZone)
+        XCTAssertTrue(text.contains("还有 2 个日程没显示"), "超上限要明确告知：\(text)")
+        XCTAssertEqual(text.components(separatedBy: "\n").filter { $0.hasPrefix("· ") }.count,
+                       DeviceToolFormatter.maxMultiDayLines)
+    }
+
     // MARK: days_ahead / 窗口
 
     func testClampDaysAhead() {
@@ -171,7 +251,9 @@ final class DeviceToolTests: XCTestCase {
                        "与 [今天0点, 明天0点) 相交才收，边界相接不算")
 
         let twoDays = ApplePIMSemantics.filterEvents(items, now: now, daysAhead: 1, timeZone: timeZone)
-        XCTAssertEqual(Set(twoDays.map(\.id)), ["inside", "all-day", "tomorrow"])
+        XCTAssertEqual(Set(twoDays.map(\.id)), ["inside", "all-day", "starts-at-end", "tomorrow"],
+                       "两天窗口到 11/24 零点为止，11/23 零点开始的「明天开始」在窗口内；"
+                       + "边界相接不算只针对窗口自己的 end")
     }
 
     func testSortEventsByStartThenTieBreakers() {
